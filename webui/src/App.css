@@ -4,6 +4,10 @@
   --accent: #7ee7ff;
   --accent-2: #9b7cff;
   --muted: #9aa4b2;
+  --term-bg: rgba(0,0,0,0.6);
+  --term-text: #dffcf0;
+  --term-success: #9ef59e;
+  --term-error: #ff9b9b;
 }
 
 .App{
@@ -179,13 +183,42 @@
 .machineHeader{ display:flex; gap:12px; align-items:center; justify-content:space-between }
 .machineActions{ display:flex; gap:8px; align-items:center }
 .terminalBox{ display:flex; gap:8px; align-items:center; margin-top:6px }
-.terminalInput{ flex:1; padding:10px; border-radius:8px; background:transparent; border:1px solid rgba(255,255,255,0.03); color:inherit }
+.terminalInput{ flex:1; padding:10px 12px; border-radius:8px; background:linear-gradient(180deg, rgba(0,0,0,0.6), rgba(255,255,255,0.02)); border:1px solid rgba(255,255,255,0.03); color:var(--term-text); font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, monospace }
+
+/* Terminal window styling for MachinePanel */
+.terminalWindow{ background: var(--term-bg); border-radius:10px; padding:12px; border:1px solid rgba(255,255,255,0.04); color:var(--term-text); font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size:13px; line-height:1.45; max-height:360px; min-height:160px; overflow:auto; box-shadow: inset 0 2px 12px rgba(0,0,0,0.6) }
+.terminalLine{ padding:4px 0; white-space:pre-wrap; word-break:break-word }
+.term-sent{ color: var(--accent-2); }
+.term-wait{ color: var(--muted); font-style:italic }
+.term-result{ color: var(--term-success); }
+.term-error{ color: var(--term-error); }
+.term-meta{ color: #9fb6c6; font-size:12px }
 .payloadGrid{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px }
 .payloadBtn{ padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.03); background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.008)); color:var(--accent); cursor:pointer; font-weight:700; transition: transform .12s ease, box-shadow .12s ease }
 .payloadBtn:hover{ transform: translateY(-3px); box-shadow: 0 12px 30px rgba(0,0,0,0.45) }
 .payloadBtn:active{ transform: translateY(1px) }
 .rowClickable{ cursor:pointer }
 .rowClickable:hover td{ background: linear-gradient(90deg, rgba(126,231,255,0.02), rgba(155,124,255,0.01)); }
+
+/* Theme preset swatches used in CustomizePanel */
+.themeSwatch{ display:inline-flex; gap:8px; align-items:center; padding:10px 12px; border-radius:10px; cursor:pointer; border:1px solid rgba(255,255,255,0.02); margin-right:8px }
+.themeSwatch .swatchBox{ width:28px; height:28px; border-radius:6px; box-shadow: inset 0 1px 0 rgba(255,255,255,0.02) }
+.themeSwatch:hover{ transform: translateY(-3px); box-shadow: 0 12px 30px rgba(0,0,0,0.45) }
+
+/* animated numeric countdown */
+.countdown{ display:inline-block; min-width:44px; text-align:right; transition: transform .28s cubic-bezier(.2,.9,.2,1), opacity .22s ease }
+.countdown.tick{ transform: translateY(-6px); opacity:0.08 }
+
+/* sleeping/idle status dot */
+.statusDot{ width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:8px; vertical-align:middle; box-shadow: 0 2px 8px rgba(0,0,0,0.5) }
+.statusDot.sleeping{ background: linear-gradient(180deg, var(--accent), var(--accent-2)); animation: pulse 1.6s infinite; }
+.statusDot.idle{ background: rgba(255,255,255,0.06); }
+@keyframes pulse{ 0%{ transform: scale(.9); opacity:0.9 } 50%{ transform: scale(1.15); opacity:1 } 100%{ transform: scale(.9); opacity:0.9 } }
+
+/* color input improvements */
+input.colorControl{ width:48px; height:36px; border-radius:8px; border:1px solid rgba(255,255,255,0.06); padding:3px; cursor:pointer; -webkit-appearance:none; appearance:none }
+input.colorControl::-webkit-color-swatch-wrapper{ padding:0 }
+input.colorControl::-webkit-color-swatch{ border-radius:6px; border:0 }
 
 @keyframes App-logo-spin {
   from {

