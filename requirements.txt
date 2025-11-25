@@ -1,0 +1,3 @@
+requests>=2.20
+rich>=10.0
+tinydb>=4.0

