@@ -106,8 +106,9 @@
 .inlineForm{ animation: inlineOpen 220ms cubic-bezier(.2,.9,.2,1) both; }
 @keyframes inlineOpen{ from { opacity: 0; transform: translateY(-6px) scale(.99) } to { opacity:1; transform: translateY(0) scale(1) } }
 
-.btn{ padding:8px 10px; border-radius:8px; border:0; cursor:pointer; font-weight:700; color:#041724; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition: transform .12s ease, box-shadow .14s ease; }
-.btn:active{ transform: translateY(1px) scale(.997) }
+.btn{ padding:8px 12px; border-radius:10px; border:1px solid rgba(255,255,255,0.04); cursor:pointer; font-weight:700; color:var(--accent); background:transparent; transition: transform .12s ease, box-shadow .14s ease, background .12s ease; }
+.btn:hover{ background: linear-gradient(90deg, rgba(126,231,255,0.03), rgba(155,124,255,0.02)); transform: translateY(-2px) }
+.btn:active{ transform: translateY(0) scale(.998) }
 
 /* small hover / focus states for table rows and buttons */
 .table tr:hover td{ background: linear-gradient(90deg, rgba(126,231,255,0.012), rgba(155,124,255,0.008)); }
@@ -183,7 +184,83 @@
 .machineHeader{ display:flex; gap:12px; align-items:center; justify-content:space-between }
 .machineActions{ display:flex; gap:8px; align-items:center }
 .terminalBox{ display:flex; gap:8px; align-items:center; margin-top:6px }
-.terminalInput{ flex:1; padding:10px 12px; border-radius:8px; background:linear-gradient(180deg, rgba(0,0,0,0.6), rgba(255,255,255,0.02)); border:1px solid rgba(255,255,255,0.03); color:var(--term-text); font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, monospace }
+.terminalInput{ flex:1; padding:10px 12px; border-radius:8px; background: linear-gradient(180deg, rgba(8,14,24,0.6), rgba(12,18,28,0.6)); border:1px solid rgba(255,255,255,0.04); color:var(--term-text); font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, monospace }
+.terminalInput::placeholder{ color: rgba(255,255,255,0.45) }
+
+/* MachinePanel tab bar */
+.machineTabs{ display:flex; gap:8px; align-items:center; padding:6px 2px }
+.tabBtn{ padding:8px 12px; font-size:14px; letter-spacing:0.6px; border-radius:999px; background:transparent; color:var(--muted); border:1px solid rgba(255,255,255,0.03); box-shadow:none; transition: background-position .42s cubic-bezier(.2,.9,.2,1), color .18s ease, box-shadow .12s ease }
+/* base gradient track (starts empty) */
+.tabBtn{ background-image: linear-gradient(90deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.02) 50%, rgba(255,255,255,0.02) 100%); background-size:200% 100%; background-position:0% 0%; }
+/* hovered tab — fill gradient left->right and fade text to white */
+.tabBtn:hover{ color: #ffffff; box-shadow: 0 12px 34px rgba(0,0,0,0.45); background-image: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 100%); background-position:100% 0; }
+/* active tab (not hovered) — subtle accent color without full gradient fill */
+.tabBtn.active{ color: var(--accent); background-image: linear-gradient(90deg, rgba(126,231,255,0.04), rgba(155,124,255,0.02)); background-position:0% 0; box-shadow: 0 8px 26px rgba(126,231,255,0.04); border-color: rgba(255,255,255,0.02) }
+/* toggle switch */
+.toggle{ display:inline-flex; align-items:center; gap:8px }
+.toggle input{ display:none }
+.toggle .switch{ width:44px; height:26px; background:rgba(255,255,255,0.06); border-radius:16px; position:relative; border:1px solid rgba(0,0,0,0.3); cursor:pointer }
+.toggle .knob{ position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:white; transition: transform .18s ease, left .18s ease }
+.toggle input:checked + .switch{ background: linear-gradient(90deg,var(--accent),var(--accent-2)); }
+.toggle input:checked + .switch .knob{ left:21px; transform: translateX(0) }
+.toggleLabel{ font-size:13px; color:var(--muted) }
+
+/* custom checkbox (vk) - compact, accessible and animated */
+.vk-checkbox{ display:inline-flex; align-items:center; gap:8px; cursor:pointer; user-select:none }
+.vk-checkbox input[type='checkbox']{ position:absolute; opacity:0; width:0; height:0; pointer-events:none }
+.vk-checkbox .vk-box{ width:20px; height:20px; border-radius:6px; display:inline-flex; align-items:center; justify-content:center; border:1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.008)); transition: background .14s ease, border-color .14s ease, transform .14s ease }
+.vk-checkbox .vk-box .vk-check{ width:14px; height:14px; fill:none; stroke:transparent; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; transition: stroke .14s ease, transform .18s cubic-bezier(.2,.9,.2,1) }
+.vk-checkbox input[type='checkbox']:checked + .vk-box{ background: linear-gradient(90deg,var(--accent),var(--accent-2)); border-color: rgba(255,255,255,0.02); transform: translateY(-1px) }
+.vk-checkbox input[type='checkbox']:checked + .vk-box .vk-check{ stroke: #041724 }
+.vk-checkbox .vk-label{ font-size:13px; color:var(--muted) }
+.vk-checkbox:focus-within .vk-box{ box-shadow: 0 0 0 4px rgba(126,231,255,0.06); }
+
+/* small variant for inline use */
+.vk-checkbox.vk-small .vk-box{ width:16px; height:16px; border-radius:4px }
+.vk-checkbox.vk-small .vk-box .vk-check{ width:10px; height:10px }
+
+/* custom select (vk) - replaces native <select> for better UX */
+.vk-select{ position:relative; display:inline-block; min-width:160px; }
+.vk-select__trigger{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; border-radius:10px; background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); border:1px solid rgba(255,255,255,0.04); color:inherit; cursor:pointer }
+.vk-select__label{ font-size:13px; color:var(--muted); }
+.vk-select__caret{ width:12px; height:12px; transform:rotate(0deg); transition: transform .18s ease }
+.vk-select.open .vk-select__caret{ transform:rotate(180deg) }
+.vk-select__list{ position:absolute; top:calc(100% + 8px); left:0; right:0; background: linear-gradient(180deg, rgba(6,8,20,0.96), rgba(11,16,32,0.96)); border:1px solid rgba(255,255,255,0.03); border-radius:10px; padding:8px; z-index:50; box-shadow: 0 18px 40px rgba(0,0,0,0.6); max-height:320px; overflow:auto }
+.vk-select__option{ padding:8px 10px; border-radius:8px; color:var(--muted); cursor:pointer }
+.vk-select__option:hover{ color:var(--accent); background: linear-gradient(90deg, rgba(126,231,255,0.02), rgba(155,124,255,0.01)); }
+.vk-select__option.selected{ color:var(--accent); font-weight:700 }
+
+/* live button */
+.btn-live{ padding:10px 14px; border-radius:12px; background: linear-gradient(90deg,#ff7b7b,#ffb27b); color:#041724; font-weight:800; box-shadow: 0 10px 30px rgba(255,123,123,0.08); border: none }
+.btn-live.pulsing{ animation: livePulse 1.6s infinite }
+@keyframes livePulse{ 0%{ transform: scale(1); box-shadow: 0 10px 30px rgba(255,123,123,0.08) } 50%{ transform: scale(1.02); box-shadow: 0 20px 40px rgba(255,123,123,0.12) } 100%{ transform: scale(1); box-shadow: 0 10px 30px rgba(255,123,123,0.08) } }
+
+/* refresh button */
+.btn-refresh{ padding:8px 10px; border-radius:8px; background:transparent; border:1px solid rgba(255,255,255,0.04); color:var(--muted); display:inline-flex; align-items:center; gap:8px }
+.btn-refresh:hover{ color:var(--accent); border-color: rgba(126,231,255,0.08); transform: translateY(-2px) }
+
+/* numeric input for config */
+.configNumber{ width:120px; padding:8px 10px; border-radius:8px; background:transparent; color:inherit; border:1px solid rgba(255,255,255,0.04) }
+
+/* screenshot gallery */
+.screenshotGallery{ display:flex; gap:8px; flex-wrap:wrap; margin-top:12px }
+.thumb{ width:120px; border-radius:8px; overflow:hidden; border:1px solid rgba(255,255,255,0.03); background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); display:flex; flex-direction:column }
+.thumbImg{ width:100%; height:84px; object-fit:cover; display:block }
+.thumbMeta{ padding:8px; display:flex; align-items:center; gap:8px; justify-content:space-between }
+.thumbTime{ font-size:11px; color:var(--muted) }
+.thumbDelete{ padding:6px 8px; border-radius:6px; background:transparent; border:1px solid rgba(255,255,255,0.03); color:var(--muted); cursor:pointer }
+.thumbDelete:hover{ color:var(--accent); border-color: rgba(126,231,255,0.08) }
+
+.galleryModal{ position:fixed; inset:0; background: rgba(0,0,0,0.95); display:flex; align-items:center; justify-content:center; z-index:9999 }
+.galleryContent{ width:100%; height:100%; max-width:none; max-height:none; overflow:auto; background: linear-gradient(180deg, rgba(6,8,20,0.96), rgba(11,16,32,0.96)); border-radius:0; padding:28px; border:0 }
+.galleryGrid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:12px }
+.modalClose{ position:absolute; right:28px; top:18px; padding:8px 10px; border-radius:8px; background:transparent; border:1px solid rgba(255,255,255,0.04); color:var(--muted); cursor:pointer }
+.thumbMore{ display:flex; align-items:center; justify-content:center; font-size:18px; color:var(--muted); background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); border-radius:8px; height:84px }
+
+/* smoother tab content transitions */
+.tabContent{ transition: opacity .26s ease, transform .26s cubic-bezier(.2,.9,.2,1); }
+.tabContent.enter{ opacity:0; transform: translateY(6px) }
+.tabContent.active{ opacity:1; transform: translateY(0) }
 
 /* Terminal window styling for MachinePanel */
 .terminalWindow{ background: var(--term-bg); border-radius:10px; padding:12px; border:1px solid rgba(255,255,255,0.04); color:var(--term-text); font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size:13px; line-height:1.45; max-height:360px; min-height:160px; overflow:auto; box-shadow: inset 0 2px 12px rgba(0,0,0,0.6) }
@@ -227,4 +304,81 @@ input.colorControl::-webkit-color-swatch{ border-radius:6px; border:0 }
   to {
     transform: rotate(360deg);
   }
+}
+
+/* FULL OVERRIDE OF ALL <select> ELEMENTS */
+
+select {
+  --bg-1: #061428;
+  --bg-2: #081a2a;
+  --accent: #66e0ff;
+  --muted: #9fb0c8;
+  --radius: 12px;
+  --pad-v: 10px;
+  --pad-h: 14px;
+
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+
+  background:
+    radial-gradient(circle at 10% 20%, rgba(255,255,255,0.9) 0 1px, transparent 1px),
+    radial-gradient(circle at 80% 30%, rgba(255,255,255,0.6) 0 1px, transparent 1px),
+    linear-gradient(180deg, var(--bg-1), var(--bg-2)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath d='M1 1l6 6 6-6' stroke='%2366e0ff' stroke-width='1.8' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    no-repeat right 14px center;
+
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat;
+
+  padding: var(--pad-v) var(--pad-h);
+  padding-right: 48px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,0.05);
+
+  width: 100%;
+  color: #e6f7ff;
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 15px;
+  cursor: pointer;
+  outline: none;
+  box-shadow:
+    0 6px 18px rgba(0,0,0,0.6),
+    inset 0 1px 0 rgba(255,255,255,0.02),
+    0 0 18px rgba(102,224,255,0.03);
+
+  transition: box-shadow .12s ease, transform .06s ease;
+}
+
+select:focus,
+select:active {
+  box-shadow:
+    0 10px 32px rgba(0,0,0,0.7),
+    0 0 28px rgba(102,224,255,0.2),
+    inset 0 1px 0 rgba(255,255,255,0.04);
+  border-color: rgba(102,224,255,0.2);
+  transform: translateY(-1px);
+}
+
+select:focus-visible {
+  box-shadow:
+    0 10px 32px rgba(0,0,0,0.7),
+    0 0 36px rgba(102,224,255,0.26),
+    inset 0 1px 0 rgba(255,255,255,0.05);
+  border-color: rgba(102,224,255,0.26);
+}
+
+/* Option colors inside dropdown (best effort — depends on OS) */
+select option[disabled] {
+  color: var(--muted);
+}
+
+select option:hover,
+select option:checked {
+  color: #e6f7ff;
+  background: #0a233a;
+}
+
+/* Hide old IE caret */
+select::-ms-expand {
+  display: none;
 }

