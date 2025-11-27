@@ -244,8 +244,10 @@
 
 /* screenshot gallery */
 .screenshotGallery{ display:flex; gap:8px; flex-wrap:wrap; margin-top:12px }
-.thumb{ width:120px; border-radius:8px; overflow:hidden; border:1px solid rgba(255,255,255,0.03); background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); display:flex; flex-direction:column }
-.thumbImg{ width:100%; height:84px; object-fit:cover; display:block }
+.thumb{ width:220px; border-radius:8px; overflow:hidden; border:1px solid rgba(255,255,255,0.03); background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); display:flex; flex-direction:column; position:relative }
+.thumbPreview{ width:100%; aspect-ratio: 16/9; overflow:hidden; display:block; background:rgba(0,0,0,0.04); position:relative }
+.thumbImg{ width:100%; height:100%; object-fit:cover; display:block }
+.pinnedBadge{ position:absolute; left:8px; top:8px; background: linear-gradient(90deg,var(--accent),var(--accent-2)); color:#041724; padding:4px 6px; border-radius:8px; font-weight:800; font-size:12px; box-shadow: 0 6px 16px rgba(0,0,0,0.5) }
 .thumbMeta{ padding:8px; display:flex; align-items:center; gap:8px; justify-content:space-between }
 .thumbTime{ font-size:11px; color:var(--muted) }
 .thumbDelete{ padding:6px 8px; border-radius:6px; background:transparent; border:1px solid rgba(255,255,255,0.03); color:var(--muted); cursor:pointer }
@@ -253,9 +255,16 @@
 
 .galleryModal{ position:fixed; inset:0; background: rgba(0,0,0,0.95); display:flex; align-items:center; justify-content:center; z-index:9999 }
 .galleryContent{ width:100%; height:100%; max-width:none; max-height:none; overflow:auto; background: linear-gradient(180deg, rgba(6,8,20,0.96), rgba(11,16,32,0.96)); border-radius:0; padding:28px; border:0 }
-.galleryGrid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap:12px }
+.galleryGrid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap:18px }
 .modalClose{ position:absolute; right:28px; top:18px; padding:8px 10px; border-radius:8px; background:transparent; border:1px solid rgba(255,255,255,0.04); color:var(--muted); cursor:pointer }
-.thumbMore{ display:flex; align-items:center; justify-content:center; font-size:18px; color:var(--muted); background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); border-radius:8px; height:84px }
+.thumbMore{ display:flex; align-items:center; justify-content:center; font-size:18px; color:var(--muted); background:linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.006)); border-radius:8px; height:120px }
+
+.fullscreenControls{ display:flex; gap:8px; align-items:center; margin-bottom:12px }
+.thumbDelete{ padding:6px 8px; border-radius:6px; background:transparent; border:1px solid rgba(255,255,255,0.03); color:var(--muted); cursor:pointer }
+.thumbDelete:hover{ color:var(--accent); border-color: rgba(126,231,255,0.08) }
+.thumbDelete[disabled]{ opacity:0.4; cursor:not-allowed }
+
+.confirmModal .confirmBox{ width:420px; padding:20px; border-radius:10px; background: linear-gradient(180deg, rgba(6,8,20,0.96), rgba(11,16,32,0.96)); border:1px solid rgba(255,255,255,0.03) }
 
 /* smoother tab content transitions */
 .tabContent{ transition: opacity .26s ease, transform .26s cubic-bezier(.2,.9,.2,1); }

